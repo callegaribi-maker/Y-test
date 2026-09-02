@@ -10,14 +10,13 @@ original:
   • Apenas 2 grupos anatômicos: L5 (lombar) e Joelho (celular fixado
     próximo ao côndilo do joelho) — o Y-BT não usa Coxa/Tornozelo.
   • Kinem traz apenas os marcadores "L 5" e "Côndilo lateral dir.".
-  • Sem ângulo de flexão do joelho via Kinem (exigiria 3 marcadores:
-    quadril, joelho e tornozelo — não disponíveis neste protocolo).
-    Em vez disso, oferece um ângulo relativo tronco(L5)–perna(Joelho)
-    exploratório, via filtro complementar ACC+GYR de cada celular —
-    útil como indicador de oscilação postural durante o alcance do Y-BT,
-    não é um ângulo clínico de flexão de joelho.
+  • Sem cálculo de ângulo do joelho — fluxo termina na seleção de janela
+    e no check de qualidade dos sinais.
   • Sincronização continua pelo pico de impacto do salto/calibração
     inicial (mesma lógica de find_highest_peak / find_sync_xcorr).
+  • Exportação para Excel usa sempre os sinais BRUTOS (sem detrend nem
+    filtro passa-baixa), recortados na janela selecionada — o
+    pré-processamento (detrend/filtro) serve só para inspeção visual.
 
 Reaproveita 100% o signal_utils.py original (funções genéricas,
 parametrizadas por keywords — nada precisou mudar lá).
@@ -38,7 +37,6 @@ from signal_utils import (
     best_match,
     build_export_sheet,
     col_default,
-    complementary_angle,
     detect_time_axis,
     find_highest_peak,
     find_sync_xcorr,
@@ -190,11 +188,6 @@ with st.sidebar:
             "Frequência alvo após reamostragem (Hz)",
             min_value=1, max_value=10000, value=100, step=10,
             help="Todos os arquivos serão reamostrados para esta frequência comum.",
-        )
-        cf_alpha = st.slider(
-            "Filtro complementar (ângulo relativo) — peso do giroscópio", 0.80, 0.999,
-            value=0.98, step=0.005,
-            help="Mais próximo de 1 = confia mais no giroscópio (menos deriva do acelerômetro).",
         )
 
 
@@ -586,59 +579,6 @@ if st.session_state.proc_data and st.session_state.synced:
     st.divider()
 
     # ══════════════════════════════════════════
-    # Ângulo relativo Tronco (L5) × Joelho — exploratório
-    # ══════════════════════════════════════════
-    st.subheader("🧍 Ângulo relativo Tronco (L5) × Joelho")
-    st.caption(
-        "Estimativa exploratória via filtro complementar (ACC+GYR) da diferença de "
-        "inclinação sagital entre o segmento do L5 (tronco/lombar) e o segmento do "
-        "Joelho. **Não é o ângulo clínico de flexão do joelho** — esse exigiria um "
-        "terceiro marcador (quadril/tornozelo), ausente no protocolo do Y-BT. Serve "
-        "como indicador relativo de oscilação/compensação postural durante o alcance."
-    )
-
-    aligned_raw, _, _ = get_aligned_data(
-        st.session_state.raw_synced, st.session_state.offsets, st.session_state.peak_ref, ref_file=kinem_ref,
-    )
-
-    angle_rel = None
-    pf_l5, pf_joelho = phone_files["l5"], phone_files["joelho"]
-    if aligned_raw and all(pf_l5[k] != NONE for k in ("acc", "gyr")) and all(pf_joelho[k] != NONE for k in ("acc", "gyr")):
-        needed = [pf_l5["acc"], pf_l5["gyr"], pf_joelho["acc"], pf_joelho["gyr"]]
-        if all(f in aligned_raw for f in needed):
-            ang_l5 = complementary_angle(
-                aligned_raw[pf_l5["acc"]], aligned_raw[pf_l5["gyr"]], pfs, role="l5", alpha=cf_alpha,
-            )
-            ang_joelho = complementary_angle(
-                aligned_raw[pf_joelho["acc"]], aligned_raw[pf_joelho["gyr"]], pfs, role="limb", alpha=cf_alpha,
-            )
-            if ang_l5 is not None and ang_joelho is not None:
-                n = min(len(ang_l5), len(ang_joelho))
-                angle_rel = ang_l5[:n] - ang_joelho[:n]
-
-    if angle_rel is None:
-        st.info("Selecione ACC + GYR de L5 e Joelho (celular) na barra lateral para calcular o ângulo relativo.")
-    else:
-        mask_ang = (x_axis >= view_start) & (x_axis <= view_end)
-        n = min(len(angle_rel), len(x_axis))
-        y_r = angle_rel[:n]
-        m = mask_ang[:n]
-        fig_ang = go.Figure()
-        fig_ang.add_trace(go.Scatter(
-            x=x_axis[:n][m], y=y_r[m], mode="lines",
-            line=dict(color="purple", width=2), name="Ângulo relativo L5 − Joelho",
-        ))
-        fig_ang.add_vline(x=0, line_dash="dash", line_color="gray", annotation_text="salto")
-        fig_ang.update_layout(
-            xaxis=dict(title="Tempo (s)  —  0 = pico do salto", range=[view_start, view_end]),
-            yaxis_title="Ângulo (graus)", height=420, template="plotly_white", hovermode="x unified",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0), margin=dict(t=30, b=40),
-        )
-        st.plotly_chart(fig_ang, use_container_width=True)
-
-    st.divider()
-
-    # ══════════════════════════════════════════
     # Check de qualidade
     # ══════════════════════════════════════════
     with st.expander("⚙️ Colunas para check de qualidade (1 por fonte)", expanded=False):
@@ -719,44 +659,50 @@ if st.session_state.proc_data and st.session_state.synced:
     st.divider()
 
     # ══════════════════════════════════════════
-    # Exportar Excel — apenas janela selecionada
+    # Exportar Excel — sinais BRUTOS, apenas janela selecionada
     # ══════════════════════════════════════════
     st.subheader("📥 Exportar Excel")
-    st.caption(f"Exporta todos os eixos X, Y, Z + ângulo relativo • janela: **{view_start:+.1f} s → {view_end:+.1f} s** relativo ao pico")
+    st.caption(
+        f"Exporta todos os eixos X, Y, Z **sem detrend/filtro** (dados brutos reamostrados e "
+        f"sincronizados) • janela: **{view_start:+.1f} s → {view_end:+.1f} s** relativo ao pico"
+    )
 
-    if st.button("Gerar arquivo Excel (L5 + Joelho + Ângulo relativo)", use_container_width=True):
-        mask_exp = (x_axis >= view_start) & (x_axis <= view_end)
-        win_idx = np.where(mask_exp)[0]
+    if st.button("Gerar arquivo Excel (L5 + Joelho — dados brutos)", use_container_width=True):
+        # Realinha os dados BRUTOS (sem detrend/lowpass) com os mesmos offsets/pico já
+        # calculados na sincronização — garante que a exportação nunca carrega filtragem,
+        # independentemente do que estiver configurado na etapa de Processamento acima.
+        aligned_raw_export, x_samp_raw, align_msg_raw = get_aligned_data(
+            st.session_state.raw_synced, st.session_state.offsets, st.session_state.peak_ref, ref_file=kinem_ref,
+        )
 
-        if len(win_idx) == 0:
-            st.error("Janela vazia — ajuste os limites de início/fim.")
+        if aligned_raw_export is None:
+            st.error(align_msg_raw)
         else:
-            windowed = {fname: df.iloc[win_idx].reset_index(drop=True) for fname, df in aligned_data.items()}
-            t_w = np.arange(len(win_idx)) / pfs
+            x_axis_raw = x_samp_raw / pfs
+            mask_exp = (x_axis_raw >= view_start) & (x_axis_raw <= view_end)
+            win_idx = np.where(mask_exp)[0]
 
-            sheets = {}
-            for gkey, gdef in GROUPS.items():
-                pf = phone_files[gkey]
-                sheets[gdef["label"]] = build_export_sheet(
-                    windowed, kinem_ref, pf["acc"], pf["gyr"], gdef["kinem_kw"], t_w,
+            if len(win_idx) == 0:
+                st.error("Janela vazia — ajuste os limites de início/fim.")
+            else:
+                windowed = {fname: df.iloc[win_idx].reset_index(drop=True) for fname, df in aligned_raw_export.items()}
+                t_w = np.arange(len(win_idx)) / pfs
+
+                sheets = {}
+                for gkey, gdef in GROUPS.items():
+                    pf = phone_files[gkey]
+                    sheets[gdef["label"]] = build_export_sheet(
+                        windowed, kinem_ref, pf["acc"], pf["gyr"], gdef["kinem_kw"], t_w,
+                    )
+
+                buf = io.BytesIO()
+                with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                    for sheet_name, df_sheet in sheets.items():
+                        df_sheet.to_excel(writer, sheet_name=sheet_name, index=False)
+                buf.seek(0)
+
+                st.download_button(
+                    "⬇ Baixar sinais_brutos_ytest.xlsx", buf, file_name="sinais_brutos_ytest.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
                 )
-
-            df_angle = pd.DataFrame({"Tempo (s)": t_w})
-            if angle_rel is not None:
-                valid_idx = win_idx[win_idx < len(angle_rel)]
-                y_r = np.full(len(win_idx), np.nan)
-                y_r[:len(valid_idx)] = angle_rel[valid_idx]
-                df_angle["Angulo_Relativo_L5_Joelho_graus"] = y_r
-
-            buf = io.BytesIO()
-            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                for sheet_name, df_sheet in sheets.items():
-                    df_sheet.to_excel(writer, sheet_name=sheet_name, index=False)
-                df_angle.to_excel(writer, sheet_name="Angulo_Relativo", index=False)
-            buf.seek(0)
-
-            st.download_button(
-                "⬇ Baixar sinais_sincronizados_ytest.xlsx", buf, file_name="sinais_sincronizados_ytest.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
