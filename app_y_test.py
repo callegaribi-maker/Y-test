@@ -89,8 +89,9 @@ STEP_NAMES = {
     2: "2 · Verificação de alinhamento",
     3: "3 · Visualização dos sinais",
     4: "4 · Seleção de janela",
-    5: "5 · Check de qualidade",
-    6: "6 · Exportar",
+    5: "5 · Seleção das fases do teste",
+    6: "6 · Check de qualidade",
+    7: "7 · Exportar",
 }
 
 
@@ -628,9 +629,96 @@ if st.session_state.proc_data and st.session_state.synced:
                 "Fim (s) relativo ao pico", value=float(min(x_max_data, 8.0)), step=0.5, key="view_end",
             )
 
-        _step_nav(back_to=3, next_to=5, next_label="Avançar para check de qualidade ▶", key_suffix="4")
+        _step_nav(back_to=3, next_to=5, next_label="Avançar para seleção das fases ▶", key_suffix="4")
 
     if st.session_state.wizard_step >= 5:
+        # ══════════════════════════════════════
+        # Seleção das fases do teste
+        # ══════════════════════════════════════
+        st.subheader("🦵 Seleção das fases do teste")
+        st.caption(
+            "Ajuste os dois marcadores abaixo acompanhando o gráfico do deslocamento vertical "
+            "do joelho (posição Z do Côndilo, no Kinem) para dividir a janela selecionada em "
+            "3 fases: **Preparação → Descida → Subida**."
+        )
+
+        knee_disp_col = st.selectbox(
+            "Coluna de deslocamento vertical do joelho (Kinem)", kinem_num,
+            index=col_default(kinem_num, [
+                "côndilo lateral dir. z", "condilo lateral dir. z", "côndilo lateral dir. d(z)",
+                "condilo lateral dir. d(z)", "condilo",
+            ]),
+            key="knee_disp_col",
+        )
+
+        mask_phase = (x_axis >= view_start) & (x_axis <= view_end)
+        x_phase = x_axis[mask_phase]
+        y_phase = (
+            try_numeric(kdf[knee_disp_col]).values[:len(x_axis)][mask_phase]
+            if knee_disp_col in kdf.columns else np.array([])
+        )
+
+        span = max(view_end - view_start, 0.1)
+        default_b1 = view_start + span / 3
+        default_b2 = view_start + 2 * span / 3
+        # Reancora os marcadores se a janela mudou e eles ficaram fora do intervalo atual
+        prev_b1 = st.session_state.get("phase_b1", default_b1)
+        prev_b2 = st.session_state.get("phase_b2", default_b2)
+        if not (view_start <= prev_b1 <= view_end):
+            prev_b1 = default_b1
+        if not (view_start <= prev_b2 <= view_end):
+            prev_b2 = default_b2
+
+        pc1, pc2 = st.columns(2)
+        with pc1:
+            phase_b1 = st.slider(
+                "Preparação → Descida (s)", min_value=float(view_start), max_value=float(view_end),
+                value=float(prev_b1), step=0.05, key="phase_b1",
+            )
+        with pc2:
+            phase_b2 = st.slider(
+                "Descida → Subida (s)", min_value=float(view_start), max_value=float(view_end),
+                value=float(max(prev_b2, phase_b1)), step=0.05, key="phase_b2",
+            )
+        # Garante ordem correta mesmo se o usuário arrastar um marcador além do outro
+        phase_b1, phase_b2 = sorted([phase_b1, phase_b2])
+
+        if len(x_phase) == 0 or np.all(np.isnan(y_phase)):
+            st.info("Selecione uma coluna de deslocamento vertical válida para visualizar as fases.")
+        else:
+            fig_phase = go.Figure()
+            fig_phase.add_trace(go.Scatter(
+                x=x_phase, y=y_phase, mode="lines", line=dict(color="#7c3aed", width=2),
+                name="Deslocamento vertical — Joelho",
+            ))
+            y_lo = float(np.nanmin(y_phase))
+            y_hi = float(np.nanmax(y_phase))
+            pad = (y_hi - y_lo) * 0.08 or 1.0
+            for x0, x1, label, color in [
+                (view_start, phase_b1, "Preparação", "rgba(148,163,184,0.18)"),
+                (phase_b1, phase_b2, "Descida", "rgba(251,191,36,0.18)"),
+                (phase_b2, view_end, "Subida", "rgba(52,211,153,0.18)"),
+            ]:
+                fig_phase.add_vrect(x0=x0, x1=x1, fillcolor=color, line_width=0,
+                                     annotation_text=label, annotation_position="top left")
+            fig_phase.add_vline(x=phase_b1, line_dash="dash", line_color="#b45309")
+            fig_phase.add_vline(x=phase_b2, line_dash="dash", line_color="#047857")
+            fig_phase.update_layout(
+                xaxis=dict(title="Tempo (s)  —  0 = pico do salto", range=[view_start, view_end]),
+                yaxis=dict(title="Deslocamento vertical (Z)", range=[y_lo - pad, y_hi + pad]),
+                height=420, template="plotly_white", hovermode="x unified", margin=dict(t=40, b=40),
+            )
+            st.plotly_chart(fig_phase, use_container_width=True)
+
+        st.caption(
+            f"**Preparação:** {view_start:+.2f} s → {phase_b1:+.2f} s  ·  "
+            f"**Descida:** {phase_b1:+.2f} s → {phase_b2:+.2f} s  ·  "
+            f"**Subida:** {phase_b2:+.2f} s → {view_end:+.2f} s"
+        )
+
+        _step_nav(back_to=4, next_to=6, next_label="Avançar para check de qualidade ▶", key_suffix="5")
+
+    if st.session_state.wizard_step >= 6:
         # ══════════════════════════════════════
         # Check de qualidade
         # ══════════════════════════════════════
@@ -665,60 +753,59 @@ if st.session_state.proc_data and st.session_state.synced:
                         ) if gyr_num else None,
                     }
 
-        show_qa = st.checkbox("🔍 Checar qualidade dos dados", value=False)
-        if show_qa:
-            qa_xmin, qa_xmax = view_start, view_end
-            mask_qa = (x_axis >= qa_xmin) & (x_axis <= qa_xmax)
-            x_view = x_axis[mask_qa]
+        qa_xmin, qa_xmax = view_start, view_end
+        mask_qa = (x_axis >= qa_xmin) & (x_axis <= qa_xmax)
+        x_view = x_axis[mask_qa]
 
-            def get_qa_entry(fname, col_name):
-                df_q = aligned_data.get(fname) if (fname and fname != NONE) else None
-                if df_q is None or col_name is None or col_name not in df_q.columns:
-                    return None
-                y = try_numeric(df_q[col_name]).values[mask_qa].astype(float)
-                if np.all(np.isnan(y)):
-                    return None
-                return (float(np.nanstd(y)), f"{fname[:20]} · {col_name}", y)
+        def get_qa_entry(fname, col_name):
+            df_q = aligned_data.get(fname) if (fname and fname != NONE) else None
+            if df_q is None or col_name is None or col_name not in df_q.columns:
+                return None
+            y = try_numeric(df_q[col_name]).values[mask_qa].astype(float)
+            if np.all(np.isnan(y)):
+                return None
+            return (float(np.nanstd(y)), f"{fname[:20]} · {col_name}", y)
 
-            qa_cols_out = st.columns(2)
-            for ui_col, gkey in zip(qa_cols_out, GROUPS):
-                gdef = GROUPS[gkey]
-                pf = phone_files[gkey]
-                group_entries = [e for e in [
-                    get_qa_entry(kinem_ref, qa_kinem_cols[gkey]),
-                    get_qa_entry(pf["acc"] if pf["acc"] != NONE else "", qa_phone_cols[gkey]["acc"]),
-                    get_qa_entry(pf["gyr"] if pf["gyr"] != NONE else "", qa_phone_cols[gkey]["gyr"]),
-                ] if e]
-                with ui_col:
-                    st.markdown(f"#### {gdef['emoji']} {gdef['label']} — Kinem vs Celular")
-                    if not group_entries:
-                        st.info("Nenhum sinal classificado neste grupo.")
-                        continue
-                    fig_qa = go.Figure()
-                    for std_val, lbl, y_raw in group_entries:
-                        mn, sd = np.nanmean(y_raw), np.nanstd(y_raw)
-                        y_norm = (y_raw - mn) / sd if sd > 0 else y_raw - mn
-                        fig_qa.add_trace(go.Scatter(
-                            x=x_view, y=y_norm, mode="lines", name=f"{lbl}  (σ_orig={std_val:.3f})",
-                        ))
-                    fig_qa.add_vline(x=0, line_dash="dash", line_color="gray", annotation_text="salto")
-                    fig_qa.update_layout(
-                        xaxis=dict(title="Tempo (s)  —  0 = pico do salto", range=[qa_xmin, qa_xmax]),
-                        yaxis_title="z-score", height=360, template="plotly_white", hovermode="x unified",
-                        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0), margin=dict(t=30, b=40),
-                    )
-                    st.plotly_chart(fig_qa, use_container_width=True)
+        qa_cols_out = st.columns(2)
+        for ui_col, gkey in zip(qa_cols_out, GROUPS):
+            gdef = GROUPS[gkey]
+            pf = phone_files[gkey]
+            group_entries = [e for e in [
+                get_qa_entry(kinem_ref, qa_kinem_cols[gkey]),
+                get_qa_entry(pf["acc"] if pf["acc"] != NONE else "", qa_phone_cols[gkey]["acc"]),
+                get_qa_entry(pf["gyr"] if pf["gyr"] != NONE else "", qa_phone_cols[gkey]["gyr"]),
+            ] if e]
+            with ui_col:
+                st.markdown(f"#### {gdef['emoji']} {gdef['label']} — Kinem vs Celular")
+                if not group_entries:
+                    st.info("Nenhum sinal classificado neste grupo.")
+                    continue
+                fig_qa = go.Figure()
+                for std_val, lbl, y_raw in group_entries:
+                    mn, sd = np.nanmean(y_raw), np.nanstd(y_raw)
+                    y_norm = (y_raw - mn) / sd if sd > 0 else y_raw - mn
+                    fig_qa.add_trace(go.Scatter(
+                        x=x_view, y=y_norm, mode="lines", name=f"{lbl}  (σ_orig={std_val:.3f})",
+                    ))
+                fig_qa.add_vline(x=0, line_dash="dash", line_color="gray", annotation_text="salto")
+                fig_qa.update_layout(
+                    xaxis=dict(title="Tempo (s)  —  0 = pico do salto", range=[qa_xmin, qa_xmax]),
+                    yaxis_title="z-score", height=360, template="plotly_white", hovermode="x unified",
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0), margin=dict(t=30, b=40),
+                )
+                st.plotly_chart(fig_qa, use_container_width=True)
 
-        _step_nav(back_to=4, next_to=6, next_label="Avançar para exportação ▶", key_suffix="5")
+        _step_nav(back_to=5, next_to=7, next_label="Avançar para exportação ▶", key_suffix="6")
 
-    if st.session_state.wizard_step >= 6:
+    if st.session_state.wizard_step >= 7:
         # ══════════════════════════════════════
         # Exportar Excel — sinais BRUTOS, apenas janela selecionada
         # ══════════════════════════════════════
         st.subheader("📥 Exportar Excel")
         st.caption(
             f"Exporta todos os eixos X, Y, Z **sem detrend/filtro** (dados brutos reamostrados e "
-            f"sincronizados) • janela: **{view_start:+.1f} s → {view_end:+.1f} s** relativo ao pico"
+            f"sincronizados), com coluna **Fase** (Preparação/Descida/Subida) • janela: "
+            f"**{view_start:+.1f} s → {view_end:+.1f} s** relativo ao pico"
         )
 
         if st.button("Gerar arquivo Excel (L5 + Joelho — dados brutos)", use_container_width=True):
@@ -742,12 +829,22 @@ if st.session_state.proc_data and st.session_state.synced:
                     windowed = {fname: df.iloc[win_idx].reset_index(drop=True) for fname, df in aligned_raw_export.items()}
                     t_w = np.arange(len(win_idx)) / pfs
 
+                    # Rotula cada amostra com a fase (Preparação/Descida/Subida) definida
+                    # na etapa anterior, usando o tempo relativo ao pico do salto.
+                    x_win_raw = x_axis_raw[win_idx]
+                    fase_col = np.where(
+                        x_win_raw < phase_b1, "Preparação",
+                        np.where(x_win_raw < phase_b2, "Descida", "Subida"),
+                    )
+
                     sheets = {}
                     for gkey, gdef in GROUPS.items():
                         pf = phone_files[gkey]
-                        sheets[gdef["label"]] = build_export_sheet(
+                        sheet = build_export_sheet(
                             windowed, kinem_ref, pf["acc"], pf["gyr"], gdef["kinem_kw"], t_w,
                         )
+                        sheet.insert(1, "Fase", fase_col[:len(sheet)])
+                        sheets[gdef["label"]] = sheet
 
                     buf = io.BytesIO()
                     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
@@ -761,4 +858,4 @@ if st.session_state.proc_data and st.session_state.synced:
                         use_container_width=True,
                     )
 
-        _step_nav(back_to=5, key_suffix="6")
+        _step_nav(back_to=6, key_suffix="7")
