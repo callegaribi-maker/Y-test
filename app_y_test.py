@@ -633,13 +633,13 @@ if st.session_state.proc_data and st.session_state.synced:
 
     if st.session_state.wizard_step >= 5:
         # ══════════════════════════════════════
-        # Seleção das fases do teste
+        # Seleção das fases do teste (N ciclos, 3 fases cada)
         # ══════════════════════════════════════
         st.subheader("🦵 Seleção das fases do teste")
         st.caption(
-            "Ajuste os dois marcadores abaixo acompanhando o gráfico do deslocamento vertical "
-            "do joelho (posição Z do Côndilo, no Kinem) para dividir a janela selecionada em "
-            "3 fases: **Preparação → Descida → Subida**."
+            "Cada vale do deslocamento vertical do joelho é um ciclo. Escolha quantos ciclos "
+            "existem na janela e ajuste os marcadores para dividir cada um em 3 fases: "
+            "**Preparação → Descida → Subida**."
         )
 
         knee_disp_col = st.selectbox(
@@ -658,30 +658,44 @@ if st.session_state.proc_data and st.session_state.synced:
             if knee_disp_col in kdf.columns else np.array([])
         )
 
+        n_ciclos = st.number_input(
+            "Número de ciclos nesta janela", min_value=1, max_value=10, value=3, step=1, key="n_ciclos",
+        )
+        PHASE_NAMES = ["Preparação", "Descida", "Subida"]
+        PHASE_COLORS = {
+            "Preparação": "rgba(148,163,184,0.18)",
+            "Descida": "rgba(251,191,36,0.18)",
+            "Subida": "rgba(52,211,153,0.18)",
+        }
+        n_bounds = 3 * n_ciclos - 1
         span = max(view_end - view_start, 0.1)
-        default_b1 = view_start + span / 3
-        default_b2 = view_start + 2 * span / 3
-        # Reancora os marcadores se a janela mudou e eles ficaram fora do intervalo atual
-        prev_b1 = st.session_state.get("phase_b1", default_b1)
-        prev_b2 = st.session_state.get("phase_b2", default_b2)
-        if not (view_start <= prev_b1 <= view_end):
-            prev_b1 = default_b1
-        if not (view_start <= prev_b2 <= view_end):
-            prev_b2 = default_b2
 
-        pc1, pc2 = st.columns(2)
-        with pc1:
-            phase_b1 = st.slider(
-                "Preparação → Descida (s)", min_value=float(view_start), max_value=float(view_end),
-                value=float(prev_b1), step=0.05, key="phase_b1",
-            )
-        with pc2:
-            phase_b2 = st.slider(
-                "Descida → Subida (s)", min_value=float(view_start), max_value=float(view_end),
-                value=float(max(prev_b2, phase_b1)), step=0.05, key="phase_b2",
-            )
-        # Garante ordem correta mesmo se o usuário arrastar um marcador além do outro
-        phase_b1, phase_b2 = sorted([phase_b1, phase_b2])
+        boundary_vals = []
+        n_cols = 3
+        for row_start in range(0, n_bounds, n_cols):
+            row_cols = st.columns(min(n_cols, n_bounds - row_start))
+            for j, col in enumerate(row_cols):
+                i = row_start + j
+                seg_a, seg_b = i, i + 1
+                cyc_a, ph_a = seg_a // 3 + 1, PHASE_NAMES[seg_a % 3]
+                cyc_b, ph_b = seg_b // 3 + 1, PHASE_NAMES[seg_b % 3]
+                label = (
+                    f"C{cyc_a} {ph_a} → C{cyc_b} {ph_b}" if cyc_a != cyc_b
+                    else f"C{cyc_a}: {ph_a} → {ph_b}"
+                )
+                key = f"phase_b_{i}"
+                default_val = view_start + (i + 1) * span / (n_bounds + 1)
+                if key in st.session_state and not (view_start <= st.session_state[key] <= view_end):
+                    st.session_state[key] = default_val
+                with col:
+                    val = st.slider(
+                        label, min_value=float(view_start), max_value=float(view_end),
+                        value=float(default_val), step=0.05, key=key,
+                    )
+                boundary_vals.append(val)
+
+        boundary_vals = sorted(boundary_vals)
+        boundaries_full = [view_start] + boundary_vals + [view_end]
 
         if len(x_phase) == 0 or np.all(np.isnan(y_phase)):
             st.info("Selecione uma coluna de deslocamento vertical válida para visualizar as fases.")
@@ -694,27 +708,30 @@ if st.session_state.proc_data and st.session_state.synced:
             y_lo = float(np.nanmin(y_phase))
             y_hi = float(np.nanmax(y_phase))
             pad = (y_hi - y_lo) * 0.08 or 1.0
-            for x0, x1, label, color in [
-                (view_start, phase_b1, "Preparação", "rgba(148,163,184,0.18)"),
-                (phase_b1, phase_b2, "Descida", "rgba(251,191,36,0.18)"),
-                (phase_b2, view_end, "Subida", "rgba(52,211,153,0.18)"),
-            ]:
-                fig_phase.add_vrect(x0=x0, x1=x1, fillcolor=color, line_width=0,
-                                     annotation_text=label, annotation_position="top left")
-            fig_phase.add_vline(x=phase_b1, line_dash="dash", line_color="#b45309")
-            fig_phase.add_vline(x=phase_b2, line_dash="dash", line_color="#047857")
+            for seg in range(3 * n_ciclos):
+                x0, x1 = boundaries_full[seg], boundaries_full[seg + 1]
+                phase = PHASE_NAMES[seg % 3]
+                cyc = seg // 3 + 1
+                fig_phase.add_vrect(
+                    x0=x0, x1=x1, fillcolor=PHASE_COLORS[phase], line_width=0,
+                    annotation_text=f"C{cyc}·{phase}" if n_ciclos > 1 else phase,
+                    annotation_position="top left", annotation_font_size=10,
+                )
+            for b in boundary_vals:
+                fig_phase.add_vline(x=b, line_dash="dash", line_color="rgba(80,80,80,0.6)")
             fig_phase.update_layout(
                 xaxis=dict(title="Tempo (s)  —  0 = pico do salto", range=[view_start, view_end]),
                 yaxis=dict(title="Deslocamento vertical (Z)", range=[y_lo - pad, y_hi + pad]),
-                height=420, template="plotly_white", hovermode="x unified", margin=dict(t=40, b=40),
+                height=440, template="plotly_white", hovermode="x unified", margin=dict(t=40, b=40),
             )
             st.plotly_chart(fig_phase, use_container_width=True)
 
-        st.caption(
-            f"**Preparação:** {view_start:+.2f} s → {phase_b1:+.2f} s  ·  "
-            f"**Descida:** {phase_b1:+.2f} s → {phase_b2:+.2f} s  ·  "
-            f"**Subida:** {phase_b2:+.2f} s → {view_end:+.2f} s"
-        )
+        with st.expander("Ver intervalos de cada fase/ciclo", expanded=False):
+            for seg in range(3 * n_ciclos):
+                x0, x1 = boundaries_full[seg], boundaries_full[seg + 1]
+                phase = PHASE_NAMES[seg % 3]
+                cyc = seg // 3 + 1
+                st.write(f"**Ciclo {cyc} — {phase}:** {x0:+.2f} s → {x1:+.2f} s")
 
         _step_nav(back_to=4, next_to=6, next_label="Avançar para check de qualidade ▶", key_suffix="5")
 
@@ -804,7 +821,7 @@ if st.session_state.proc_data and st.session_state.synced:
         st.subheader("📥 Exportar Excel")
         st.caption(
             f"Exporta todos os eixos X, Y, Z **sem detrend/filtro** (dados brutos reamostrados e "
-            f"sincronizados), com coluna **Fase** (Preparação/Descida/Subida) • janela: "
+            f"sincronizados), com colunas **Ciclo** e **Fase** (Preparação/Descida/Subida) • janela: "
             f"**{view_start:+.1f} s → {view_end:+.1f} s** relativo ao pico"
         )
 
@@ -829,13 +846,15 @@ if st.session_state.proc_data and st.session_state.synced:
                     windowed = {fname: df.iloc[win_idx].reset_index(drop=True) for fname, df in aligned_raw_export.items()}
                     t_w = np.arange(len(win_idx)) / pfs
 
-                    # Rotula cada amostra com a fase (Preparação/Descida/Subida) definida
-                    # na etapa anterior, usando o tempo relativo ao pico do salto.
+                    # Rotula cada amostra com Ciclo (1..N) e Fase (Preparação/Descida/Subida)
+                    # definidos na etapa anterior, usando o tempo relativo ao pico do salto.
                     x_win_raw = x_axis_raw[win_idx]
-                    fase_col = np.where(
-                        x_win_raw < phase_b1, "Preparação",
-                        np.where(x_win_raw < phase_b2, "Descida", "Subida"),
+                    seg_idx = np.clip(
+                        np.searchsorted(boundaries_full, x_win_raw, side="right") - 1,
+                        0, 3 * n_ciclos - 1,
                     )
+                    fase_col = np.array(PHASE_NAMES)[seg_idx % 3]
+                    ciclo_col = (seg_idx // 3 + 1).astype(int)
 
                     sheets = {}
                     for gkey, gdef in GROUPS.items():
@@ -843,7 +862,8 @@ if st.session_state.proc_data and st.session_state.synced:
                         sheet = build_export_sheet(
                             windowed, kinem_ref, pf["acc"], pf["gyr"], gdef["kinem_kw"], t_w,
                         )
-                        sheet.insert(1, "Fase", fase_col[:len(sheet)])
+                        sheet.insert(1, "Ciclo", ciclo_col[:len(sheet)])
+                        sheet.insert(2, "Fase", fase_col[:len(sheet)])
                         sheets[gdef["label"]] = sheet
 
                     buf = io.BytesIO()
