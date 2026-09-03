@@ -79,9 +79,48 @@ DEFAULT_SESSION_STATE = {
     "show_preview": False,
     "synced": False,
     "synced_kinem_cols": {},
+    "wizard_step": 1,
 }
 for key, default in DEFAULT_SESSION_STATE.items():
     st.session_state.setdefault(key, default)
+
+STEP_NAMES = {
+    1: "1 · Sincronizar",
+    2: "2 · Verificação de alinhamento",
+    3: "3 · Visualização dos sinais",
+    4: "4 · Seleção de janela",
+    5: "5 · Check de qualidade",
+    6: "6 · Exportar",
+}
+
+
+def _goto(n):
+    st.session_state.wizard_step = n
+    st.rerun()
+
+
+def _step_nav(back_to=None, next_to=None, next_label="Avançar ▶", next_disabled=False, key_suffix=""):
+    """Renderiza botões de navegação Voltar/Avançar entre etapas do assistente."""
+    st.divider()
+    if back_to is not None and next_to is not None:
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("◀ Voltar", use_container_width=True, key=f"back_{key_suffix}"):
+                _goto(back_to)
+        with c2:
+            if st.button(next_label, type="primary", use_container_width=True,
+                         disabled=next_disabled, key=f"next_{key_suffix}"):
+                _goto(next_to)
+    elif back_to is not None:
+        if st.button("◀ Voltar", key=f"back_{key_suffix}"):
+            _goto(back_to)
+    elif next_to is not None:
+        if st.button(next_label, type="primary", use_container_width=True,
+                     disabled=next_disabled, key=f"next_{key_suffix}"):
+            _goto(next_to)
+
+
+st.caption(f"**Etapa atual:** {STEP_NAMES.get(st.session_state.wizard_step, '')}")
 
 
 # ══════════════════════════════════════════════
@@ -439,63 +478,74 @@ def render_alignment_check(title, kinem_col, phone_file, phone_col, label_k, lab
 
 
 if st.session_state.synced and st.session_state.raw_synced and st.session_state.peak_ref is not None:
-    vfs = st.session_state.target_fs or 100
-    vraw, vx_samp, _ = get_aligned_data(
-        st.session_state.raw_synced, st.session_state.offsets, st.session_state.peak_ref, ref_file=kinem_ref,
-    )
-    if vraw is None:
-        vraw = {f: df.copy() for f, df in st.session_state.raw_synced.items()}
-        vx_samp = np.arange(max(len(d) for d in vraw.values())) - st.session_state.peak_ref
-    vx = vx_samp / vfs
+    if st.session_state.wizard_step == 1:
+        st.divider()
+        st.success("✅ Sincronização concluída.")
+        if st.button("Avançar para verificação de alinhamento ▶", type="primary",
+                      use_container_width=True, key="next_1"):
+            _goto(2)
 
-    for gkey, gdef in GROUPS.items():
-        pf = phone_files[gkey]
-        render_alignment_check(
-            gdef["label"], kinem_sync_cols[gkey], pf["acc"], pf["acc_col"],
-            f"Kinem {gdef['label']}", f"ACC {gdef['label']}", vraw, vx, vfs,
+    if st.session_state.wizard_step >= 2:
+        vfs = st.session_state.target_fs or 100
+        vraw, vx_samp, _ = get_aligned_data(
+            st.session_state.raw_synced, st.session_state.offsets, st.session_state.peak_ref, ref_file=kinem_ref,
         )
+        if vraw is None:
+            vraw = {f: df.copy() for f, df in st.session_state.raw_synced.items()}
+            vx_samp = np.arange(max(len(d) for d in vraw.values())) - st.session_state.peak_ref
+        vx = vx_samp / vfs
 
-    # ══════════════════════════════════════════
-    # Processamento inline
-    # ══════════════════════════════════════════
-    st.divider()
-    proc_done = bool(st.session_state.proc_data)
-    with st.expander(
-        "⚙️ Processamento  ✔ Aplicado" if proc_done else "⚙️ Processamento  ← Configure e processe aqui",
-        expanded=not proc_done,
-    ):
-        pc1, pc2 = st.columns(2)
-        with pc1:
-            do_detrend = st.checkbox("Detrend (remover tendência linear)", value=True, key="do_detrend")
-        with pc2:
-            do_lowpass = st.checkbox("Filtro passa-baixa (Butterworth)", value=True, key="do_lowpass")
+        for gkey, gdef in GROUPS.items():
+            pf = phone_files[gkey]
+            render_alignment_check(
+                gdef["label"], kinem_sync_cols[gkey], pf["acc"], pf["acc_col"],
+                f"Kinem {gdef['label']}", f"ACC {gdef['label']}", vraw, vx, vfs,
+            )
 
-        if do_lowpass:
-            fl1, fl2 = st.columns(2)
-            with fl1:
-                cutoff_hz = st.number_input(
-                    "Frequência de corte (Hz)", min_value=0.1, max_value=float(fs_target // 2),
-                    value=min(20.0, float(fs_target // 2 - 1)), step=0.5, key="cutoff_hz",
-                )
-            with fl2:
-                filt_order = st.selectbox("Ordem do filtro", [2, 4, 6, 8], index=1, key="filt_order")
-        else:
-            cutoff_hz, filt_order = 20.0, 4
+        # ══════════════════════════════════════
+        # Processamento inline
+        # ══════════════════════════════════════
+        st.divider()
+        proc_done = bool(st.session_state.proc_data)
+        with st.expander(
+            "⚙️ Processamento  ✔ Aplicado" if proc_done else "⚙️ Processamento  ← Configure e processe aqui",
+            expanded=not proc_done,
+        ):
+            pc1, pc2 = st.columns(2)
+            with pc1:
+                do_detrend = st.checkbox("Detrend (remover tendência linear)", value=True, key="do_detrend")
+            with pc2:
+                do_lowpass = st.checkbox("Filtro passa-baixa (Butterworth)", value=True, key="do_lowpass")
 
-        if st.button("🔧 Processar", type="primary", use_container_width=True, key="btn_processar"):
-            raw = st.session_state.raw_synced
-            proc, proc_nofilter = {}, {}
-            for fname, df in raw.items():
-                r = df.copy()
-                if do_detrend:
-                    r = apply_detrend(r)
-                proc_nofilter[fname] = r.copy()
-                if do_lowpass:
-                    r = apply_lowpass(r, fs_target, cutoff_hz, filt_order)
-                proc[fname] = r
-            st.session_state.proc_data = proc
-            st.session_state.proc_data_nofilter = proc_nofilter
-            st.rerun()
+            if do_lowpass:
+                fl1, fl2 = st.columns(2)
+                with fl1:
+                    cutoff_hz = st.number_input(
+                        "Frequência de corte (Hz)", min_value=0.1, max_value=float(fs_target // 2),
+                        value=min(20.0, float(fs_target // 2 - 1)), step=0.5, key="cutoff_hz",
+                    )
+                with fl2:
+                    filt_order = st.selectbox("Ordem do filtro", [2, 4, 6, 8], index=1, key="filt_order")
+            else:
+                cutoff_hz, filt_order = 20.0, 4
+
+            if st.button("🔧 Processar", type="primary", use_container_width=True, key="btn_processar"):
+                raw = st.session_state.raw_synced
+                proc, proc_nofilter = {}, {}
+                for fname, df in raw.items():
+                    r = df.copy()
+                    if do_detrend:
+                        r = apply_detrend(r)
+                    proc_nofilter[fname] = r.copy()
+                    if do_lowpass:
+                        r = apply_lowpass(r, fs_target, cutoff_hz, filt_order)
+                    proc[fname] = r
+                st.session_state.proc_data = proc
+                st.session_state.proc_data_nofilter = proc_nofilter
+                st.rerun()
+
+        _step_nav(back_to=1, next_to=3, next_label="Avançar para visualização ▶",
+                  next_disabled=not bool(st.session_state.proc_data), key_suffix="2")
 
 
 # ══════════════════════════════════════════════
@@ -536,173 +586,179 @@ if st.session_state.proc_data and st.session_state.synced:
 
     group_traces = {gkey: make_auto_traces(gkey) for gkey in GROUPS}
 
-    st.divider()
-    st.subheader("📊 Sinais sincronizados — todos os eixos X, Y, Z")
-    st.caption(align_msg)
+    if st.session_state.wizard_step >= 3:
+        st.divider()
+        st.subheader("📊 Sinais sincronizados — todos os eixos X, Y, Z")
+        st.caption(align_msg)
 
-    def render_auto_charts(traces):
-        for fname, col, y in traces:
-            fig_i = go.Figure()
-            fig_i.add_trace(go.Scatter(x=x_axis, y=y, mode="lines", line=dict(width=1.5), showlegend=False))
-            fig_i.add_vline(x=0, line_dash="dash", line_color="gray",
-                             annotation_text="salto", annotation_position="top right")
-            fig_i.update_layout(
-                title=dict(text=f"<b>{fname[:26]}</b> · {col}", font_size=12),
-                xaxis=dict(title="Tempo (s)  —  0 = pico do salto", range=[x_min_data, x_max_data]),
-                yaxis_title="", height=220,
-                margin=dict(t=42, b=38, l=55, r=10), hovermode="x", template="plotly_white",
+        def render_auto_charts(traces):
+            for fname, col, y in traces:
+                fig_i = go.Figure()
+                fig_i.add_trace(go.Scatter(x=x_axis, y=y, mode="lines", line=dict(width=1.5), showlegend=False))
+                fig_i.add_vline(x=0, line_dash="dash", line_color="gray",
+                                 annotation_text="salto", annotation_position="top right")
+                fig_i.update_layout(
+                    title=dict(text=f"<b>{fname[:26]}</b> · {col}", font_size=12),
+                    xaxis=dict(title="Tempo (s)  —  0 = pico do salto", range=[x_min_data, x_max_data]),
+                    yaxis_title="", height=220,
+                    margin=dict(t=42, b=38, l=55, r=10), hovermode="x", template="plotly_white",
+                )
+                st.plotly_chart(fig_i, use_container_width=True)
+
+        auto_cols = st.columns(2)
+        for auto_col, gkey in zip(auto_cols, GROUPS):
+            with auto_col:
+                st.markdown(f"#### {GROUPS[gkey]['emoji']} {GROUPS[gkey]['label']}")
+                render_auto_charts(group_traces[gkey])
+
+        _step_nav(back_to=2, next_to=4, next_label="Avançar para seleção de janela ▶", key_suffix="3")
+
+    if st.session_state.wizard_step >= 4:
+        # ══════════════════════════════════════
+        # Seleção de janela
+        # ══════════════════════════════════════
+        st.subheader("🪟 Seleção de janela")
+        wc1, wc2 = st.columns(2)
+        with wc1:
+            view_start = st.number_input(
+                "Início (s) relativo ao pico", value=float(max(x_min_data, -2.0)), step=0.5, key="view_start",
             )
-            st.plotly_chart(fig_i, use_container_width=True)
+        with wc2:
+            view_end = st.number_input(
+                "Fim (s) relativo ao pico", value=float(min(x_max_data, 8.0)), step=0.5, key="view_end",
+            )
 
-    auto_cols = st.columns(2)
-    for auto_col, gkey in zip(auto_cols, GROUPS):
-        with auto_col:
-            st.markdown(f"#### {GROUPS[gkey]['emoji']} {GROUPS[gkey]['label']}")
-            render_auto_charts(group_traces[gkey])
+        _step_nav(back_to=3, next_to=5, next_label="Avançar para check de qualidade ▶", key_suffix="4")
 
-    st.divider()
+    if st.session_state.wizard_step >= 5:
+        # ══════════════════════════════════════
+        # Check de qualidade
+        # ══════════════════════════════════════
+        with st.expander("⚙️ Colunas para check de qualidade (1 por fonte)", expanded=False):
+            st.caption("Escolha exatamente qual coluna usar de cada fonte. Os sinais serão plotados sobrepostos (z-score).")
 
-    # ══════════════════════════════════════════
-    # Seleção de janela
-    # ══════════════════════════════════════════
-    st.subheader("🪟 Seleção de janela")
-    wc1, wc2 = st.columns(2)
-    with wc1:
-        view_start = st.number_input(
-            "Início (s) relativo ao pico", value=float(max(x_min_data, -2.0)), step=0.5, key="view_start",
-        )
-    with wc2:
-        view_end = st.number_input(
-            "Fim (s) relativo ao pico", value=float(min(x_max_data, 8.0)), step=0.5, key="view_end",
-        )
+            qa_kinem_keywords = {
+                "l5": ["l 5 d(z)", "l5 d(z)", "l 5 v(z)", "l5 v(z)", "l 5 a(z)", "l5 a(z)", "l 5 z", "l5"],
+                "joelho": ["condilo lateral dir. a(z)", "condilo a(z)", "condilo lateral dir.", "condilo", "joelho"],
+            }
 
-    st.divider()
-
-    # ══════════════════════════════════════════
-    # Check de qualidade
-    # ══════════════════════════════════════════
-    with st.expander("⚙️ Colunas para check de qualidade (1 por fonte)", expanded=False):
-        st.caption("Escolha exatamente qual coluna usar de cada fonte. Os sinais serão plotados sobrepostos (z-score).")
-
-        qa_kinem_keywords = {
-            "l5": ["l 5 d(z)", "l5 d(z)", "l 5 v(z)", "l5 v(z)", "l 5 a(z)", "l5 a(z)", "l 5 z", "l5"],
-            "joelho": ["condilo lateral dir. a(z)", "condilo a(z)", "condilo lateral dir.", "condilo", "joelho"],
-        }
-
-        qa_kinem_cols, qa_phone_cols = {}, {}
-        qa_cols_ui = st.columns(2)
-        for ui_col, gkey in zip(qa_cols_ui, GROUPS):
-            with ui_col:
-                gdef = GROUPS[gkey]
-                qa_kinem_cols[gkey] = st.selectbox(
-                    f"{gdef['emoji']} Kinem — {gdef['label']}", kinem_num, key=f"qa_kinem_{gkey}",
-                    index=col_default(kinem_num, qa_kinem_keywords[gkey]),
-                )
-                pf = phone_files[gkey]
-                acc_num = numeric_cols(aligned_data.get(pf["acc"], pd.DataFrame())) if pf["acc"] != NONE else []
-                gyr_num = numeric_cols(aligned_data.get(pf["gyr"], pd.DataFrame())) if pf["gyr"] != NONE else []
-                qa_phone_cols[gkey] = {
-                    "acc": st.selectbox(
-                        f"{gdef['emoji']} ACC — {gdef['label']}", acc_num if acc_num else ["—"],
-                        key=f"qa_acc_{gkey}", index=col_default(acc_num, ["z", "y", "x"]) if acc_num else 0,
-                    ) if acc_num else None,
-                    "gyr": st.selectbox(
-                        f"{gdef['emoji']} GYR — {gdef['label']}", gyr_num if gyr_num else ["—"],
-                        key=f"qa_gyr_{gkey}", index=col_default(gyr_num, ["z", "y", "x"]) if gyr_num else 0,
-                    ) if gyr_num else None,
-                }
-
-    show_qa = st.checkbox("🔍 Checar qualidade dos dados", value=False)
-    if show_qa:
-        qa_xmin, qa_xmax = view_start, view_end
-        mask_qa = (x_axis >= qa_xmin) & (x_axis <= qa_xmax)
-        x_view = x_axis[mask_qa]
-
-        def get_qa_entry(fname, col_name):
-            df_q = aligned_data.get(fname) if (fname and fname != NONE) else None
-            if df_q is None or col_name is None or col_name not in df_q.columns:
-                return None
-            y = try_numeric(df_q[col_name]).values[mask_qa].astype(float)
-            if np.all(np.isnan(y)):
-                return None
-            return (float(np.nanstd(y)), f"{fname[:20]} · {col_name}", y)
-
-        qa_cols_out = st.columns(2)
-        for ui_col, gkey in zip(qa_cols_out, GROUPS):
-            gdef = GROUPS[gkey]
-            pf = phone_files[gkey]
-            group_entries = [e for e in [
-                get_qa_entry(kinem_ref, qa_kinem_cols[gkey]),
-                get_qa_entry(pf["acc"] if pf["acc"] != NONE else "", qa_phone_cols[gkey]["acc"]),
-                get_qa_entry(pf["gyr"] if pf["gyr"] != NONE else "", qa_phone_cols[gkey]["gyr"]),
-            ] if e]
-            with ui_col:
-                st.markdown(f"#### {gdef['emoji']} {gdef['label']} — Kinem vs Celular")
-                if not group_entries:
-                    st.info("Nenhum sinal classificado neste grupo.")
-                    continue
-                fig_qa = go.Figure()
-                for std_val, lbl, y_raw in group_entries:
-                    mn, sd = np.nanmean(y_raw), np.nanstd(y_raw)
-                    y_norm = (y_raw - mn) / sd if sd > 0 else y_raw - mn
-                    fig_qa.add_trace(go.Scatter(
-                        x=x_view, y=y_norm, mode="lines", name=f"{lbl}  (σ_orig={std_val:.3f})",
-                    ))
-                fig_qa.add_vline(x=0, line_dash="dash", line_color="gray", annotation_text="salto")
-                fig_qa.update_layout(
-                    xaxis=dict(title="Tempo (s)  —  0 = pico do salto", range=[qa_xmin, qa_xmax]),
-                    yaxis_title="z-score", height=360, template="plotly_white", hovermode="x unified",
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0), margin=dict(t=30, b=40),
-                )
-                st.plotly_chart(fig_qa, use_container_width=True)
-
-    st.divider()
-
-    # ══════════════════════════════════════════
-    # Exportar Excel — sinais BRUTOS, apenas janela selecionada
-    # ══════════════════════════════════════════
-    st.subheader("📥 Exportar Excel")
-    st.caption(
-        f"Exporta todos os eixos X, Y, Z **sem detrend/filtro** (dados brutos reamostrados e "
-        f"sincronizados) • janela: **{view_start:+.1f} s → {view_end:+.1f} s** relativo ao pico"
-    )
-
-    if st.button("Gerar arquivo Excel (L5 + Joelho — dados brutos)", use_container_width=True):
-        # Realinha os dados BRUTOS (sem detrend/lowpass) com os mesmos offsets/pico já
-        # calculados na sincronização — garante que a exportação nunca carrega filtragem,
-        # independentemente do que estiver configurado na etapa de Processamento acima.
-        aligned_raw_export, x_samp_raw, align_msg_raw = get_aligned_data(
-            st.session_state.raw_synced, st.session_state.offsets, st.session_state.peak_ref, ref_file=kinem_ref,
-        )
-
-        if aligned_raw_export is None:
-            st.error(align_msg_raw)
-        else:
-            x_axis_raw = x_samp_raw / pfs
-            mask_exp = (x_axis_raw >= view_start) & (x_axis_raw <= view_end)
-            win_idx = np.where(mask_exp)[0]
-
-            if len(win_idx) == 0:
-                st.error("Janela vazia — ajuste os limites de início/fim.")
-            else:
-                windowed = {fname: df.iloc[win_idx].reset_index(drop=True) for fname, df in aligned_raw_export.items()}
-                t_w = np.arange(len(win_idx)) / pfs
-
-                sheets = {}
-                for gkey, gdef in GROUPS.items():
+            qa_kinem_cols, qa_phone_cols = {}, {}
+            qa_cols_ui = st.columns(2)
+            for ui_col, gkey in zip(qa_cols_ui, GROUPS):
+                with ui_col:
+                    gdef = GROUPS[gkey]
+                    qa_kinem_cols[gkey] = st.selectbox(
+                        f"{gdef['emoji']} Kinem — {gdef['label']}", kinem_num, key=f"qa_kinem_{gkey}",
+                        index=col_default(kinem_num, qa_kinem_keywords[gkey]),
+                    )
                     pf = phone_files[gkey]
-                    sheets[gdef["label"]] = build_export_sheet(
-                        windowed, kinem_ref, pf["acc"], pf["gyr"], gdef["kinem_kw"], t_w,
+                    acc_num = numeric_cols(aligned_data.get(pf["acc"], pd.DataFrame())) if pf["acc"] != NONE else []
+                    gyr_num = numeric_cols(aligned_data.get(pf["gyr"], pd.DataFrame())) if pf["gyr"] != NONE else []
+                    qa_phone_cols[gkey] = {
+                        "acc": st.selectbox(
+                            f"{gdef['emoji']} ACC — {gdef['label']}", acc_num if acc_num else ["—"],
+                            key=f"qa_acc_{gkey}", index=col_default(acc_num, ["z", "y", "x"]) if acc_num else 0,
+                        ) if acc_num else None,
+                        "gyr": st.selectbox(
+                            f"{gdef['emoji']} GYR — {gdef['label']}", gyr_num if gyr_num else ["—"],
+                            key=f"qa_gyr_{gkey}", index=col_default(gyr_num, ["z", "y", "x"]) if gyr_num else 0,
+                        ) if gyr_num else None,
+                    }
+
+        show_qa = st.checkbox("🔍 Checar qualidade dos dados", value=False)
+        if show_qa:
+            qa_xmin, qa_xmax = view_start, view_end
+            mask_qa = (x_axis >= qa_xmin) & (x_axis <= qa_xmax)
+            x_view = x_axis[mask_qa]
+
+            def get_qa_entry(fname, col_name):
+                df_q = aligned_data.get(fname) if (fname and fname != NONE) else None
+                if df_q is None or col_name is None or col_name not in df_q.columns:
+                    return None
+                y = try_numeric(df_q[col_name]).values[mask_qa].astype(float)
+                if np.all(np.isnan(y)):
+                    return None
+                return (float(np.nanstd(y)), f"{fname[:20]} · {col_name}", y)
+
+            qa_cols_out = st.columns(2)
+            for ui_col, gkey in zip(qa_cols_out, GROUPS):
+                gdef = GROUPS[gkey]
+                pf = phone_files[gkey]
+                group_entries = [e for e in [
+                    get_qa_entry(kinem_ref, qa_kinem_cols[gkey]),
+                    get_qa_entry(pf["acc"] if pf["acc"] != NONE else "", qa_phone_cols[gkey]["acc"]),
+                    get_qa_entry(pf["gyr"] if pf["gyr"] != NONE else "", qa_phone_cols[gkey]["gyr"]),
+                ] if e]
+                with ui_col:
+                    st.markdown(f"#### {gdef['emoji']} {gdef['label']} — Kinem vs Celular")
+                    if not group_entries:
+                        st.info("Nenhum sinal classificado neste grupo.")
+                        continue
+                    fig_qa = go.Figure()
+                    for std_val, lbl, y_raw in group_entries:
+                        mn, sd = np.nanmean(y_raw), np.nanstd(y_raw)
+                        y_norm = (y_raw - mn) / sd if sd > 0 else y_raw - mn
+                        fig_qa.add_trace(go.Scatter(
+                            x=x_view, y=y_norm, mode="lines", name=f"{lbl}  (σ_orig={std_val:.3f})",
+                        ))
+                    fig_qa.add_vline(x=0, line_dash="dash", line_color="gray", annotation_text="salto")
+                    fig_qa.update_layout(
+                        xaxis=dict(title="Tempo (s)  —  0 = pico do salto", range=[qa_xmin, qa_xmax]),
+                        yaxis_title="z-score", height=360, template="plotly_white", hovermode="x unified",
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0), margin=dict(t=30, b=40),
+                    )
+                    st.plotly_chart(fig_qa, use_container_width=True)
+
+        _step_nav(back_to=4, next_to=6, next_label="Avançar para exportação ▶", key_suffix="5")
+
+    if st.session_state.wizard_step >= 6:
+        # ══════════════════════════════════════
+        # Exportar Excel — sinais BRUTOS, apenas janela selecionada
+        # ══════════════════════════════════════
+        st.subheader("📥 Exportar Excel")
+        st.caption(
+            f"Exporta todos os eixos X, Y, Z **sem detrend/filtro** (dados brutos reamostrados e "
+            f"sincronizados) • janela: **{view_start:+.1f} s → {view_end:+.1f} s** relativo ao pico"
+        )
+
+        if st.button("Gerar arquivo Excel (L5 + Joelho — dados brutos)", use_container_width=True):
+            # Realinha os dados BRUTOS (sem detrend/lowpass) com os mesmos offsets/pico já
+            # calculados na sincronização — garante que a exportação nunca carrega filtragem,
+            # independentemente do que estiver configurado na etapa de Processamento acima.
+            aligned_raw_export, x_samp_raw, align_msg_raw = get_aligned_data(
+                st.session_state.raw_synced, st.session_state.offsets, st.session_state.peak_ref, ref_file=kinem_ref,
+            )
+
+            if aligned_raw_export is None:
+                st.error(align_msg_raw)
+            else:
+                x_axis_raw = x_samp_raw / pfs
+                mask_exp = (x_axis_raw >= view_start) & (x_axis_raw <= view_end)
+                win_idx = np.where(mask_exp)[0]
+
+                if len(win_idx) == 0:
+                    st.error("Janela vazia — ajuste os limites de início/fim.")
+                else:
+                    windowed = {fname: df.iloc[win_idx].reset_index(drop=True) for fname, df in aligned_raw_export.items()}
+                    t_w = np.arange(len(win_idx)) / pfs
+
+                    sheets = {}
+                    for gkey, gdef in GROUPS.items():
+                        pf = phone_files[gkey]
+                        sheets[gdef["label"]] = build_export_sheet(
+                            windowed, kinem_ref, pf["acc"], pf["gyr"], gdef["kinem_kw"], t_w,
+                        )
+
+                    buf = io.BytesIO()
+                    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                        for sheet_name, df_sheet in sheets.items():
+                            df_sheet.to_excel(writer, sheet_name=sheet_name, index=False)
+                    buf.seek(0)
+
+                    st.download_button(
+                        "⬇ Baixar sinais_brutos_ytest.xlsx", buf, file_name="sinais_brutos_ytest.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
                     )
 
-                buf = io.BytesIO()
-                with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                    for sheet_name, df_sheet in sheets.items():
-                        df_sheet.to_excel(writer, sheet_name=sheet_name, index=False)
-                buf.seek(0)
-
-                st.download_button(
-                    "⬇ Baixar sinais_brutos_ytest.xlsx", buf, file_name="sinais_brutos_ytest.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                )
+        _step_nav(back_to=5, key_suffix="6")
