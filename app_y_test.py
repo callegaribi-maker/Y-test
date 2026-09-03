@@ -29,6 +29,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
+from scipy.signal import find_peaks
 
 from signal_utils import (
     NONE_LABEL,
@@ -89,8 +90,8 @@ STEP_NAMES = {
     2: "2 · Verificação de alinhamento",
     3: "3 · Visualização dos sinais",
     4: "4 · Seleção de janela",
-    5: "5 · Seleção das fases do teste",
-    6: "6 · Check de qualidade",
+    5: "5 · Check de qualidade",
+    6: "6 · Seleção das fases do teste",
     7: "7 · Exportar",
 }
 
@@ -119,6 +120,67 @@ def _step_nav(back_to=None, next_to=None, next_label="Avançar ▶", next_disabl
         if st.button(next_label, type="primary", use_container_width=True,
                      disabled=next_disabled, key=f"next_{key_suffix}"):
             _goto(next_to)
+
+
+def _auto_phase_boundaries(x, y, n_ciclos):
+    """Estima automaticamente os limites de Preparação/Descida/Subida para N ciclos,
+    usando os vales (picos inferiores) do sinal como referência: acha os N vales mais
+    profundos, depois busca — para cada um — onde o sinal sai do platô (início da
+    descida) e onde volta a se aproximar do platô (fim da subida). Retorna uma lista
+    ordenada com 3*n_ciclos - 1 tempos, ou None se não for possível detectar.
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    n = len(x)
+    if n < 10 or n_ciclos < 1:
+        return None
+
+    span = x[-1] - x[0]
+    fs = (n - 1) / span if span > 0 else 100.0
+    min_dist = max(int(fs * span / (n_ciclos * 6)), 1)
+    try:
+        trough_idx, _ = find_peaks(-y, distance=min_dist)
+    except Exception:
+        return None
+    if len(trough_idx) < n_ciclos:
+        return None
+
+    order = np.argsort(y[trough_idx])[:n_ciclos]
+    trough_idx = np.sort(trough_idx[order])
+
+    def edge_backward(i_start, i_ref, threshold):
+        for k in range(i_ref, i_start - 1, -1):
+            if y[k] >= threshold:
+                return k
+        return i_start
+
+    def edge_forward(i_ref, i_end, threshold):
+        for k in range(i_ref, i_end + 1):
+            if y[k] >= threshold:
+                return k
+        return i_end
+
+    bounds = []
+    for ci, ti in enumerate(trough_idx):
+        prev_bound = trough_idx[ci - 1] if ci > 0 else 0
+        next_bound = trough_idx[ci + 1] if ci < len(trough_idx) - 1 else n - 1
+        seg_before = y[prev_bound:ti + 1]
+        seg_after = y[ti:next_bound + 1]
+        if len(seg_before) == 0 or len(seg_after) == 0:
+            return None
+        plateau_before = np.percentile(seg_before, 90)
+        plateau_after = np.percentile(seg_after, 90)
+        trough_val = y[ti]
+        thr_before = trough_val + 0.9 * (plateau_before - trough_val)
+        thr_after = trough_val + 0.9 * (plateau_after - trough_val)
+        a_i = edge_backward(prev_bound, ti, thr_before)
+        c_i = edge_forward(ti, next_bound, thr_after)
+        bounds.append(x[a_i])
+        bounds.append(x[ti])
+        if ci < len(trough_idx) - 1:
+            bounds.append(x[c_i])
+    bounds = sorted(bounds)
+    return bounds if len(bounds) == 3 * n_ciclos - 1 else None
 
 
 st.caption(f"**Etapa atual:** {STEP_NAMES.get(st.session_state.wizard_step, '')}")
@@ -629,113 +691,9 @@ if st.session_state.proc_data and st.session_state.synced:
                 "Fim (s) relativo ao pico", value=float(min(x_max_data, 8.0)), step=0.5, key="view_end",
             )
 
-        _step_nav(back_to=3, next_to=5, next_label="Avançar para seleção das fases ▶", key_suffix="4")
+        _step_nav(back_to=3, next_to=5, next_label="Avançar para check de qualidade ▶", key_suffix="4")
 
     if st.session_state.wizard_step >= 5:
-        # ══════════════════════════════════════
-        # Seleção das fases do teste (N ciclos, 3 fases cada)
-        # ══════════════════════════════════════
-        st.subheader("🦵 Seleção das fases do teste")
-        st.caption(
-            "Cada vale do deslocamento vertical do joelho é um ciclo. Escolha quantos ciclos "
-            "existem na janela e ajuste os marcadores para dividir cada um em 3 fases: "
-            "**Preparação → Descida → Subida**."
-        )
-
-        knee_disp_col = st.selectbox(
-            "Coluna de deslocamento vertical do joelho (Kinem)", kinem_num,
-            index=col_default(kinem_num, [
-                "côndilo lateral dir. z", "condilo lateral dir. z", "côndilo lateral dir. d(z)",
-                "condilo lateral dir. d(z)", "condilo",
-            ]),
-            key="knee_disp_col",
-        )
-
-        mask_phase = (x_axis >= view_start) & (x_axis <= view_end)
-        x_phase = x_axis[mask_phase]
-        y_phase = (
-            try_numeric(kdf[knee_disp_col]).values[:len(x_axis)][mask_phase]
-            if knee_disp_col in kdf.columns else np.array([])
-        )
-
-        n_ciclos = st.number_input(
-            "Número de ciclos nesta janela", min_value=1, max_value=10, value=3, step=1, key="n_ciclos",
-        )
-        PHASE_NAMES = ["Preparação", "Descida", "Subida"]
-        PHASE_COLORS = {
-            "Preparação": "rgba(148,163,184,0.18)",
-            "Descida": "rgba(251,191,36,0.18)",
-            "Subida": "rgba(52,211,153,0.18)",
-        }
-        n_bounds = 3 * n_ciclos - 1
-        span = max(view_end - view_start, 0.1)
-
-        boundary_vals = []
-        n_cols = 3
-        for row_start in range(0, n_bounds, n_cols):
-            row_cols = st.columns(min(n_cols, n_bounds - row_start))
-            for j, col in enumerate(row_cols):
-                i = row_start + j
-                seg_a, seg_b = i, i + 1
-                cyc_a, ph_a = seg_a // 3 + 1, PHASE_NAMES[seg_a % 3]
-                cyc_b, ph_b = seg_b // 3 + 1, PHASE_NAMES[seg_b % 3]
-                label = (
-                    f"C{cyc_a} {ph_a} → C{cyc_b} {ph_b}" if cyc_a != cyc_b
-                    else f"C{cyc_a}: {ph_a} → {ph_b}"
-                )
-                key = f"phase_b_{i}"
-                default_val = view_start + (i + 1) * span / (n_bounds + 1)
-                if key in st.session_state and not (view_start <= st.session_state[key] <= view_end):
-                    st.session_state[key] = default_val
-                with col:
-                    val = st.slider(
-                        label, min_value=float(view_start), max_value=float(view_end),
-                        value=float(default_val), step=0.05, key=key,
-                    )
-                boundary_vals.append(val)
-
-        boundary_vals = sorted(boundary_vals)
-        boundaries_full = [view_start] + boundary_vals + [view_end]
-
-        if len(x_phase) == 0 or np.all(np.isnan(y_phase)):
-            st.info("Selecione uma coluna de deslocamento vertical válida para visualizar as fases.")
-        else:
-            fig_phase = go.Figure()
-            fig_phase.add_trace(go.Scatter(
-                x=x_phase, y=y_phase, mode="lines", line=dict(color="#7c3aed", width=2),
-                name="Deslocamento vertical — Joelho",
-            ))
-            y_lo = float(np.nanmin(y_phase))
-            y_hi = float(np.nanmax(y_phase))
-            pad = (y_hi - y_lo) * 0.08 or 1.0
-            for seg in range(3 * n_ciclos):
-                x0, x1 = boundaries_full[seg], boundaries_full[seg + 1]
-                phase = PHASE_NAMES[seg % 3]
-                cyc = seg // 3 + 1
-                fig_phase.add_vrect(
-                    x0=x0, x1=x1, fillcolor=PHASE_COLORS[phase], line_width=0,
-                    annotation_text=f"C{cyc}·{phase}" if n_ciclos > 1 else phase,
-                    annotation_position="top left", annotation_font_size=10,
-                )
-            for b in boundary_vals:
-                fig_phase.add_vline(x=b, line_dash="dash", line_color="rgba(80,80,80,0.6)")
-            fig_phase.update_layout(
-                xaxis=dict(title="Tempo (s)  —  0 = pico do salto", range=[view_start, view_end]),
-                yaxis=dict(title="Deslocamento vertical (Z)", range=[y_lo - pad, y_hi + pad]),
-                height=440, template="plotly_white", hovermode="x unified", margin=dict(t=40, b=40),
-            )
-            st.plotly_chart(fig_phase, use_container_width=True)
-
-        with st.expander("Ver intervalos de cada fase/ciclo", expanded=False):
-            for seg in range(3 * n_ciclos):
-                x0, x1 = boundaries_full[seg], boundaries_full[seg + 1]
-                phase = PHASE_NAMES[seg % 3]
-                cyc = seg // 3 + 1
-                st.write(f"**Ciclo {cyc} — {phase}:** {x0:+.2f} s → {x1:+.2f} s")
-
-        _step_nav(back_to=4, next_to=6, next_label="Avançar para check de qualidade ▶", key_suffix="5")
-
-    if st.session_state.wizard_step >= 6:
         # ══════════════════════════════════════
         # Check de qualidade
         # ══════════════════════════════════════
@@ -811,6 +769,122 @@ if st.session_state.proc_data and st.session_state.synced:
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0), margin=dict(t=30, b=40),
                 )
                 st.plotly_chart(fig_qa, use_container_width=True)
+
+        _step_nav(back_to=4, next_to=6, next_label="Avançar para seleção das fases ▶", key_suffix="5")
+
+    if st.session_state.wizard_step >= 6:
+        # ══════════════════════════════════════
+        # Seleção das fases do teste (N ciclos, 3 fases cada)
+        # ══════════════════════════════════════
+        st.subheader("🦵 Seleção das fases do teste")
+        st.caption(
+            "Cada vale do deslocamento vertical do joelho é um ciclo. Escolha quantos ciclos "
+            "existem na janela e ajuste os marcadores para dividir cada um em 3 fases: "
+            "**Preparação → Descida → Subida**."
+        )
+
+        knee_disp_col = st.selectbox(
+            "Coluna de deslocamento vertical do joelho (Kinem)", kinem_num,
+            index=col_default(kinem_num, [
+                "côndilo lateral dir. z", "condilo lateral dir. z", "côndilo lateral dir. d(z)",
+                "condilo lateral dir. d(z)", "condilo",
+            ]),
+            key="knee_disp_col",
+        )
+
+        mask_phase = (x_axis >= view_start) & (x_axis <= view_end)
+        x_phase = x_axis[mask_phase]
+        y_phase = (
+            try_numeric(kdf[knee_disp_col]).values[:len(x_axis)][mask_phase]
+            if knee_disp_col in kdf.columns else np.array([])
+        )
+
+        n_ciclos = st.number_input(
+            "Número de ciclos nesta janela", min_value=1, max_value=10, value=3, step=1, key="n_ciclos",
+        )
+        PHASE_NAMES = ["Preparação", "Descida", "Subida"]
+        PHASE_COLORS = {
+            "Preparação": "rgba(148,163,184,0.18)",
+            "Descida": "rgba(251,191,36,0.18)",
+            "Subida": "rgba(52,211,153,0.18)",
+        }
+        n_bounds = 3 * n_ciclos - 1
+        span = max(view_end - view_start, 0.1)
+
+        auto_bounds = (
+            _auto_phase_boundaries(x_phase, y_phase, n_ciclos)
+            if len(x_phase) > 10 and not np.all(np.isnan(y_phase)) else None
+        )
+        if auto_bounds is None:
+            st.caption(
+                "⚠️ Não consegui detectar os ciclos automaticamente nesta janela/coluna — "
+                "marcadores começam espaçados igualmente. Ajuste manualmente."
+            )
+        else:
+            st.caption("✅ Marcadores posicionados automaticamente a partir dos vales do sinal — ajuste fino se precisar.")
+
+        boundary_vals = []
+        n_cols = 3
+        for row_start in range(0, n_bounds, n_cols):
+            row_cols = st.columns(min(n_cols, n_bounds - row_start))
+            for j, col in enumerate(row_cols):
+                i = row_start + j
+                seg_a, seg_b = i, i + 1
+                cyc_a, ph_a = seg_a // 3 + 1, PHASE_NAMES[seg_a % 3]
+                cyc_b, ph_b = seg_b // 3 + 1, PHASE_NAMES[seg_b % 3]
+                label = (
+                    f"C{cyc_a} {ph_a} → C{cyc_b} {ph_b}" if cyc_a != cyc_b
+                    else f"C{cyc_a}: {ph_a} → {ph_b}"
+                )
+                key = f"phase_b_{i}"
+                default_val = auto_bounds[i] if auto_bounds is not None else view_start + (i + 1) * span / (n_bounds + 1)
+                if key in st.session_state and not (view_start <= st.session_state[key] <= view_end):
+                    st.session_state[key] = default_val
+                with col:
+                    val = st.slider(
+                        label, min_value=float(view_start), max_value=float(view_end),
+                        value=float(default_val), step=0.05, key=key,
+                    )
+                boundary_vals.append(val)
+
+        boundary_vals = sorted(boundary_vals)
+        boundaries_full = [view_start] + boundary_vals + [view_end]
+
+        if len(x_phase) == 0 or np.all(np.isnan(y_phase)):
+            st.info("Selecione uma coluna de deslocamento vertical válida para visualizar as fases.")
+        else:
+            fig_phase = go.Figure()
+            fig_phase.add_trace(go.Scatter(
+                x=x_phase, y=y_phase, mode="lines", line=dict(color="#7c3aed", width=2),
+                name="Deslocamento vertical — Joelho",
+            ))
+            y_lo = float(np.nanmin(y_phase))
+            y_hi = float(np.nanmax(y_phase))
+            pad = (y_hi - y_lo) * 0.08 or 1.0
+            for seg in range(3 * n_ciclos):
+                x0, x1 = boundaries_full[seg], boundaries_full[seg + 1]
+                phase = PHASE_NAMES[seg % 3]
+                cyc = seg // 3 + 1
+                fig_phase.add_vrect(
+                    x0=x0, x1=x1, fillcolor=PHASE_COLORS[phase], line_width=0,
+                    annotation_text=f"C{cyc}·{phase}" if n_ciclos > 1 else phase,
+                    annotation_position="top left", annotation_font_size=10,
+                )
+            for b in boundary_vals:
+                fig_phase.add_vline(x=b, line_dash="dash", line_color="rgba(80,80,80,0.6)")
+            fig_phase.update_layout(
+                xaxis=dict(title="Tempo (s)  —  0 = pico do salto", range=[view_start, view_end]),
+                yaxis=dict(title="Deslocamento vertical (Z)", range=[y_lo - pad, y_hi + pad]),
+                height=440, template="plotly_white", hovermode="x unified", margin=dict(t=40, b=40),
+            )
+            st.plotly_chart(fig_phase, use_container_width=True)
+
+        with st.expander("Ver intervalos de cada fase/ciclo", expanded=False):
+            for seg in range(3 * n_ciclos):
+                x0, x1 = boundaries_full[seg], boundaries_full[seg + 1]
+                phase = PHASE_NAMES[seg % 3]
+                cyc = seg // 3 + 1
+                st.write(f"**Ciclo {cyc} — {phase}:** {x0:+.2f} s → {x1:+.2f} s")
 
         _step_nav(back_to=5, next_to=7, next_label="Avançar para exportação ▶", key_suffix="6")
 
