@@ -1141,11 +1141,22 @@ if st.session_state.proc_data and st.session_state.synced:
                     fam_cols = st.columns(3)
                     for idx, (fam_name, traces) in enumerate(families_present):
                         sliced = [(label, y[mask_c]) for label, y in traces]
+                        if fam_name == "Deslocamento":
+                            # Centraliza cada eixo (subtrai a própria média) só para exibição —
+                            # X/Y/Z de posição têm offsets absolutos bem diferentes (ex: Z perto
+                            # de 1.0 m, X/Y perto de 0), o que "esconde" a variação de X/Y quando
+                            # plotados juntos na mesma escala. Não altera dado nenhum exportado.
+                            sliced = [
+                                (f"{label} (centralizado)", y - np.nanmean(y) if len(y) else y)
+                                for label, y in sliced
+                            ]
                         fig_f = _square_phase_chart(
                             f"{gkey.upper()} · {fam_name}", x_c, sliced, phase_regions,
                         )
                         with fam_cols[idx % 3]:
                             st.plotly_chart(fig_f, use_container_width=False)
+                        if fam_name == "Deslocamento":
+                            st.caption("↕️ Cada eixo centralizado na própria média (só visual) para comparar melhor descida/subida.")
 
         _step_nav(back_to=5, next_to=7, next_label="Avançar para exportação ▶", key_suffix="6")
 
