@@ -73,6 +73,7 @@ DEFAULT_SESSION_STATE = {
     "raw_synced": {},
     "proc_data": {},
     "proc_data_nofilter": {},
+    "proc_data_cycles": {},
     "offsets": {},
     "peak_ref": None,
     "target_fs": 100,
@@ -89,11 +90,10 @@ STEP_NAMES = {
     1: "1 · Sincronizar",
     2: "2 · Verificação de alinhamento",
     3: "3 · Visualização dos sinais",
-    4: "4 · Seleção de janela",
-    5: "5 · Check de qualidade",
-    6: "6 · Seleção das fases do teste",
-    7: "7 · Ciclos separados",
-    8: "8 · Exportar",
+    4: "4 · Check de qualidade",
+    5: "5 · Janela e fases do teste",
+    6: "6 · Ciclos separados",
+    7: "7 · Exportar",
 }
 
 
@@ -130,6 +130,54 @@ def _step_nav(back_to=None, next_to=None, next_label="Avançar ▶", next_disabl
         if st.button(next_label, type="primary", use_container_width=True,
                      disabled=next_disabled, key=f"next_{key_suffix}"):
             _goto(next_to)
+
+
+def _detect_first_plateau_start(x, y, fs=100.0, min_dur=1.2, rel_thr=0.9,
+                                 prominence_frac=0.3, ignore_before_t=0.5):
+    """Estima onde termina o início 'de acomodação' do teste (salto + assentamento)
+    e começa o primeiro platô estável do deslocamento vertical do joelho. Ignora
+    ativamente uma pequena janela ao redor do pico do salto (ignore_before_t) para
+    não confundir esse solavanco com o platô de fato. Retorna x[0] (sem corte) se
+    não conseguir detectar nada confiável.
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    n = len(x)
+    if n < 20:
+        return float(x[0]) if n else 0.0
+    overall_range = np.nanmax(y) - np.nanmin(y)
+    if overall_range <= 0:
+        return float(x[0])
+
+    search_mask = x >= ignore_before_t
+    if not np.any(search_mask):
+        search_mask = np.ones(n, dtype=bool)
+    idx_offset = int(np.argmax(search_mask))
+    y_search = y[search_mask]
+    try:
+        troughs, _ = find_peaks(-y_search, prominence=prominence_frac * overall_range)
+    except Exception:
+        return float(x[0])
+    if len(troughs) == 0:
+        return float(x[0])
+
+    first_trough = troughs[0] + idx_offset
+    seg_before = y[0:first_trough + 1]
+    plateau_level = np.percentile(seg_before, 90)
+    trough_val = y[first_trough]
+    threshold = trough_val + rel_thr * (plateau_level - trough_val)
+
+    win = max(int(fs * min_dur), 3)
+    above = y >= threshold
+    run_len = 0
+    for i in range(first_trough + 1):
+        if above[i]:
+            run_len += 1
+            if run_len >= win:
+                return float(x[i - win + 1])
+        else:
+            run_len = 0
+    return float(x[0])
 
 
 def _auto_phase_boundaries(x, y, n_ciclos):
@@ -692,26 +740,9 @@ if st.session_state.proc_data and st.session_state.synced:
                 st.markdown(f"#### {GROUPS[gkey]['emoji']} {GROUPS[gkey]['label']}")
                 render_auto_charts(group_traces[gkey])
 
-        _step_nav(back_to=2, next_to=4, next_label="Avançar para seleção de janela ▶", key_suffix="3")
+        _step_nav(back_to=2, next_to=4, next_label="Avançar para check de qualidade ▶", key_suffix="3")
 
     if st.session_state.wizard_step >= 4:
-        # ══════════════════════════════════════
-        # Seleção de janela
-        # ══════════════════════════════════════
-        st.subheader("🪟 Seleção de janela")
-        wc1, wc2 = st.columns(2)
-        with wc1:
-            view_start = st.number_input(
-                "Início (s) relativo ao pico", value=float(max(x_min_data, -2.0)), step=0.5, key="view_start",
-            )
-        with wc2:
-            view_end = st.number_input(
-                "Fim (s) relativo ao pico", value=float(min(x_max_data, 8.0)), step=0.5, key="view_end",
-            )
-
-        _step_nav(back_to=3, next_to=5, next_label="Avançar para check de qualidade ▶", key_suffix="4")
-
-    if st.session_state.wizard_step >= 5:
         # ══════════════════════════════════════
         # Check de qualidade
         # ══════════════════════════════════════
@@ -746,7 +777,7 @@ if st.session_state.proc_data and st.session_state.synced:
                         ) if gyr_num else None,
                     }
 
-        qa_xmin, qa_xmax = view_start, view_end
+        qa_xmin, qa_xmax = x_min_data, x_max_data
         mask_qa = (x_axis >= qa_xmin) & (x_axis <= qa_xmax)
         x_view = x_axis[mask_qa]
 
@@ -788,13 +819,39 @@ if st.session_state.proc_data and st.session_state.synced:
                 )
                 st.plotly_chart(fig_qa, use_container_width=True)
 
-        _step_nav(back_to=4, next_to=6, next_label="Avançar para seleção das fases ▶", key_suffix="5")
+        _step_nav(back_to=3, next_to=5, next_label="Avançar para seleção das fases ▶", key_suffix="4")
 
-    if st.session_state.wizard_step >= 6:
+    if st.session_state.wizard_step >= 5:
         # ══════════════════════════════════════
-        # Seleção das fases do teste (N ciclos, 3 fases cada)
+        # Seleção das fases do teste (inclui o corte de janela)
         # ══════════════════════════════════════
-        st.subheader("🦵 Seleção das fases do teste")
+        st.subheader("🪟🦵 Janela e fases do teste")
+
+        _default_knee_col_idx = col_default(kinem_num, [
+            "côndilo lateral dir. z", "condilo lateral dir. z", "côndilo lateral dir. d(z)",
+            "condilo lateral dir. d(z)", "condilo",
+        ])
+        _default_knee_col = kinem_num[_default_knee_col_idx] if kinem_num else None
+        auto_t0 = x_min_data
+        if _default_knee_col and _default_knee_col in kdf.columns:
+            y_full_for_auto = try_numeric(kdf[_default_knee_col]).values[:len(x_axis)]
+            auto_t0 = _detect_first_plateau_start(x_axis, y_full_for_auto)
+
+        wc1, wc2 = st.columns(2)
+        with wc1:
+            view_start = st.number_input(
+                "Início (s) relativo ao pico", value=float(auto_t0), step=0.5, key="view_start",
+            )
+        with wc2:
+            view_end = st.number_input(
+                "Fim (s) relativo ao pico", value=float(x_max_data), step=0.5, key="view_end",
+            )
+        st.caption(
+            "💡 O início já pula automaticamente o começo do teste (salto + acomodação) até o "
+            "primeiro platô do joelho. Ajuste se precisar incluir mais ou menos coisa."
+        )
+
+        st.divider()
         st.caption(
             "Cada vale do deslocamento vertical do joelho é um ciclo. Escolha quantos ciclos "
             "existem na janela e ajuste os marcadores para dividir cada um em 3 fases: "
@@ -803,10 +860,7 @@ if st.session_state.proc_data and st.session_state.synced:
 
         knee_disp_col = st.selectbox(
             "Coluna de deslocamento vertical do joelho (Kinem)", kinem_num,
-            index=col_default(kinem_num, [
-                "côndilo lateral dir. z", "condilo lateral dir. z", "côndilo lateral dir. d(z)",
-                "condilo lateral dir. d(z)", "condilo",
-            ]),
+            index=_default_knee_col_idx,
             key="knee_disp_col",
         )
 
@@ -910,9 +964,9 @@ if st.session_state.proc_data and st.session_state.synced:
             if tail_start < view_end - 1e-6:
                 st.caption(f"⚪ Fora de qualquer ciclo (não entra em nenhuma fase): {tail_start:+.2f} s → {view_end:+.2f} s")
 
-        _step_nav(back_to=5, next_to=7, next_label="Avançar para ver ciclos separados ▶", key_suffix="6")
+        _step_nav(back_to=4, next_to=6, next_label="Avançar para ver ciclos separados ▶", key_suffix="5")
 
-    if st.session_state.wizard_step >= 7:
+    if st.session_state.wizard_step >= 6:
         # ══════════════════════════════════════
         # Ciclos separados — todos os eixos (sensores + cinemática)
         # ══════════════════════════════════════
@@ -933,12 +987,89 @@ if st.session_state.proc_data and st.session_state.synced:
         else:
             st.caption(f"{n_ciclos} ciclo(s) definidos na etapa anterior, mostrados separadamente abaixo.")
 
+        with st.expander("⚙️ Reprocessar antes de ver os ciclos (opcional)", expanded=False):
+            st.caption(
+                "Reaplica detrend/filtro só para esta visualização, com configurações "
+                "independentes das usadas na etapa 2 — não afeta a exportação (que é sempre bruta)."
+            )
+            rpc1, rpc2 = st.columns(2)
+            with rpc1:
+                do_detrend_f = st.checkbox("Detrend", value=True, key="do_detrend_f7")
+            with rpc2:
+                do_lowpass_f = st.checkbox("Filtro passa-baixa", value=True, key="do_lowpass_f7")
+            if do_lowpass_f:
+                rfl1, rfl2 = st.columns(2)
+                with rfl1:
+                    cutoff_f = st.number_input(
+                        "Frequência de corte (Hz)", min_value=0.1, max_value=float(fs_target // 2),
+                        value=min(20.0, float(fs_target // 2 - 1)), step=0.5, key="cutoff_f7",
+                    )
+                with rfl2:
+                    filt_order_f = st.selectbox("Ordem do filtro", [2, 4, 6, 8], index=1, key="filt_order_f7")
+            else:
+                cutoff_f, filt_order_f = 20.0, 4
+
+            if st.button("🔧 Reprocessar para esta visualização", key="btn_reprocess_f7"):
+                raw = st.session_state.raw_synced
+                proc2 = {}
+                for fname, df in raw.items():
+                    r = df.copy()
+                    if do_detrend_f:
+                        r = apply_detrend(r)
+                    if do_lowpass_f:
+                        r = apply_lowpass(r, fs_target, cutoff_f, filt_order_f)
+                    if fname == kinem_ref:
+                        disp_cols = [c for c in df.columns if _is_kinem_displacement_col(c)]
+                        for c in disp_cols:
+                            if c in r.columns:
+                                r[c] = df[c].values
+                    proc2[fname] = r
+                st.session_state.proc_data_cycles = proc2
+                st.rerun()
+
+            if st.session_state.get("proc_data_cycles"):
+                if st.button("↩ Voltar a usar o processamento padrão (etapa 2)", key="btn_reset_reprocess_f7"):
+                    st.session_state.proc_data_cycles = {}
+                    st.rerun()
+
+        def _rebuild_group_traces(aligned_src):
+            kdf_src = aligned_src.get(kinem_ref, pd.DataFrame())
+
+            def _phone_xyz(fname):
+                if fname == NONE or fname not in aligned_src:
+                    return []
+                return [c for c in aligned_src[fname].columns if is_xyz_col(c)]
+
+            out = {}
+            for gk in GROUPS:
+                gd = GROUPS[gk]
+                pfk = phone_files[gk]
+                k_cols = kinem_cols_for_body(kdf_src, *gd["kinem_kw"])
+                traces = [(kinem_ref, c, try_numeric(kdf_src[c])) for c in k_cols if c in kdf_src.columns]
+                if pfk["acc"] != NONE and pfk["acc"] in aligned_src:
+                    for c in _phone_xyz(pfk["acc"]):
+                        traces.append((pfk["acc"], c, try_numeric(aligned_src[pfk["acc"]][c])))
+                if pfk["gyr"] != NONE and pfk["gyr"] in aligned_src:
+                    for c in _phone_xyz(pfk["gyr"]):
+                        traces.append((pfk["gyr"], c, try_numeric(aligned_src[pfk["gyr"]][c])))
+                out[gk] = traces
+            return out
+
+        if st.session_state.get("proc_data_cycles"):
+            aligned_cycles, _, _ = get_aligned_data(
+                st.session_state.proc_data_cycles, st.session_state.offsets, st.session_state.peak_ref, ref_file=kinem_ref,
+            )
+            group_traces_cycles = _rebuild_group_traces(aligned_cycles) if aligned_cycles else group_traces
+            st.info("🔁 Usando o reprocessamento definido acima (independente da etapa 2).")
+        else:
+            group_traces_cycles = group_traces
+
         def _traces_by_family(gkey):
             """Agrupa os traços de um grupo (L5/Joelho) em 5 famílias: Deslocamento,
             Velocidade e Aceleração (Kinem, 3 eixos cada) + ACC e GYR (celular, 3 eixos)."""
             pf = phone_files[gkey]
             fam = {"Deslocamento": [], "Velocidade": [], "Aceleração": [], "ACC (celular)": [], "GYR (celular)": []}
-            for fname, colname, y in group_traces[gkey]:
+            for fname, colname, y in group_traces_cycles[gkey]:
                 if fname == kinem_ref:
                     cn = colname.lower()
                     if "v(" in cn:
@@ -995,9 +1126,9 @@ if st.session_state.proc_data and st.session_state.synced:
                         with fam_cols[idx % 3]:
                             st.plotly_chart(fig_f, use_container_width=False)
 
-        _step_nav(back_to=6, next_to=8, next_label="Avançar para exportação ▶", key_suffix="7")
+        _step_nav(back_to=5, next_to=7, next_label="Avançar para exportação ▶", key_suffix="6")
 
-    if st.session_state.wizard_step >= 8:
+    if st.session_state.wizard_step >= 7:
         # ══════════════════════════════════════
         # Exportar Excel — sinais BRUTOS, apenas janela selecionada
         # ══════════════════════════════════════
@@ -1073,4 +1204,4 @@ if st.session_state.proc_data and st.session_state.synced:
                         use_container_width=True,
                     )
 
-        _step_nav(back_to=7, key_suffix="8")
+        _step_nav(back_to=6, key_suffix="7")
