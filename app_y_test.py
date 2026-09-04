@@ -1199,6 +1199,13 @@ if st.session_state.proc_data and st.session_state.synced:
                         with fam_cols[2]:
                             st.image(ref_path, use_container_width=True,
                                      caption="Posicionamento do celular e orientação dos eixos")
+                    elif ref_path:
+                        with fam_cols[2]:
+                            st.caption(
+                                f"⚠️ Imagem de referência não encontrada em: `{ref_path}`. "
+                                f"Confira se a pasta `assets/` (com `ref_l5.png` e `ref_joelho.png`, "
+                                f"tudo minúsculo) foi enviada ao repositório junto do app_y_test.py."
+                            )
 
         _step_nav(back_to=5, next_to=7, next_label="Avançar para exportação ▶", key_suffix="6")
 
