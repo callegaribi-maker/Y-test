@@ -97,6 +97,15 @@ STEP_NAMES = {
 }
 
 
+def _is_kinem_displacement_col(col):
+    """True para colunas de deslocamento puro do Kinem (ex: 'L 5 X', 'Côndilo lateral
+    dir. Z') — exclui velocidade v(X), aceleração a(X), Length, abs e #2D."""
+    cn = col.strip().lower()
+    if "(" in cn or "length" in cn or "abs" in cn or "#2d" in cn:
+        return False
+    return cn.endswith("x") or cn.endswith("y") or cn.endswith("z")
+
+
 def _goto(n):
     st.session_state.wizard_step = n
     st.rerun()
@@ -602,6 +611,15 @@ if st.session_state.synced and st.session_state.raw_synced and st.session_state.
                     proc_nofilter[fname] = r.copy()
                     if do_lowpass:
                         r = apply_lowpass(r, fs_target, cutoff_hz, filt_order)
+                    if fname == kinem_ref:
+                        # O deslocamento (X/Y/Z) do Kinem nunca é alterado pelo
+                        # detrend/filtro — só velocidade, aceleração e os demais
+                        # arquivos (ACC/GYR do celular) recebem o processamento.
+                        disp_cols = [c for c in df.columns if _is_kinem_displacement_col(c)]
+                        for c in disp_cols:
+                            if c in r.columns:
+                                r[c] = df[c].values
+                                proc_nofilter[fname][c] = df[c].values
                     proc[fname] = r
                 st.session_state.proc_data = proc
                 st.session_state.proc_data_nofilter = proc_nofilter
