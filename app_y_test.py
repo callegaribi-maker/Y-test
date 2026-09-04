@@ -925,6 +925,22 @@ if st.session_state.proc_data and st.session_state.synced:
         boundary_vals = sorted(boundary_vals)
         boundaries_full = [view_start] + boundary_vals + [view_end]
 
+        # Limita o 1º platô (Preparação do Ciclo 1) ao máximo dos demais platôs
+        # (Preparação dos outros ciclos) — o que sobrar antes disso fica em branco,
+        # do mesmo jeito que o trecho depois do fim do último ciclo.
+        leading_blank_end = boundaries_full[0]
+        if n_ciclos >= 2:
+            other_prep_durs = [
+                boundaries_full[(c - 1) * 3 + 1] - boundaries_full[(c - 1) * 3]
+                for c in range(2, n_ciclos + 1)
+            ]
+            max_other_prep = max(other_prep_durs) if other_prep_durs else None
+            if max_other_prep is not None:
+                cycle1_prep_dur = boundaries_full[1] - boundaries_full[0]
+                if cycle1_prep_dur > max_other_prep:
+                    boundaries_full[0] = boundaries_full[1] - max_other_prep
+                    leading_blank_end = boundaries_full[0]
+
         if len(x_phase) == 0 or np.all(np.isnan(y_phase)):
             st.info("Selecione uma coluna de deslocamento vertical válida para visualizar as fases.")
         else:
@@ -955,6 +971,11 @@ if st.session_state.proc_data and st.session_state.synced:
             st.plotly_chart(fig_phase, use_container_width=True)
 
         with st.expander("Ver intervalos de cada fase/ciclo", expanded=False):
+            if leading_blank_end > view_start + 1e-6:
+                st.caption(
+                    f"⚪ Fora de qualquer ciclo (platô inicial maior que os demais, recortado): "
+                    f"{view_start:+.2f} s → {leading_blank_end:+.2f} s"
+                )
             for seg in range(3 * n_ciclos):
                 x0, x1 = boundaries_full[seg], boundaries_full[seg + 1]
                 phase = PHASE_NAMES[seg % 3]
@@ -1130,78 +1151,157 @@ if st.session_state.proc_data and st.session_state.synced:
 
     if st.session_state.wizard_step >= 7:
         # ══════════════════════════════════════
-        # Exportar Excel — sinais BRUTOS, apenas janela selecionada
+        # Exportar Excel
         # ══════════════════════════════════════
         st.subheader("📥 Exportar Excel")
-        st.caption(
-            f"Exporta todos os eixos X, Y, Z **sem detrend/filtro** (dados brutos reamostrados e "
-            f"sincronizados), com colunas **Ciclo**, **Direção** e **Fase** (Preparação/Descida/Subida) • janela: "
-            f"**{view_start:+.1f} s → {view_end:+.1f} s** relativo ao pico"
-        )
 
-        if st.button("Gerar arquivo Excel (L5 + Joelho — dados brutos)", use_container_width=True):
-            # Realinha os dados BRUTOS (sem detrend/lowpass) com os mesmos offsets/pico já
-            # calculados na sincronização — garante que a exportação nunca carrega filtragem,
-            # independentemente do que estiver configurado na etapa de Processamento acima.
+        DIRECTION_NAMES_EXP = ["Anterior", "Posteromedial", "Posterolateral"]
+
+        def _sheet_name_for_cycle(c):
+            if n_ciclos == 3 and 1 <= c <= 3:
+                return f"Ciclo {c} - {DIRECTION_NAMES_EXP[c - 1]}"
+            return f"Ciclo {c}"
+
+        def _build_full_cycle_sheet(windowed_src, t_w, fase_arr):
+            """Uma aba com Tempo + Fase, colunas de cinemática (Kinem, L5 e Joelho)
+            primeiro, seguidas de TODOS os canais (ACC/GYR de L5 e Joelho)."""
+            kdf_w = windowed_src.get(kinem_ref, pd.DataFrame())
+            kinem_parts, sensor_parts = [], []
+            for gkey, gdef in GROUPS.items():
+                k_cols = kinem_cols_for_body(kdf_w, *gdef["kinem_kw"])
+                if k_cols:
+                    kinem_parts.append(kdf_w[k_cols].reset_index(drop=True))
+                pf = phone_files[gkey]
+                if pf["acc"] != NONE and pf["acc"] in windowed_src:
+                    adf = windowed_src[pf["acc"]]
+                    cols = [c for c in adf.columns if is_xyz_col(c)]
+                    if cols:
+                        sensor_parts.append(adf[cols].add_prefix(f"{gdef['label']}_ACC_").reset_index(drop=True))
+                if pf["gyr"] != NONE and pf["gyr"] in windowed_src:
+                    gyr_df = windowed_src[pf["gyr"]]
+                    cols = [c for c in gyr_df.columns if is_xyz_col(c)]
+                    if cols:
+                        sensor_parts.append(gyr_df[cols].add_prefix(f"{gdef['label']}_GYR_").reset_index(drop=True))
+            base = pd.DataFrame({"Tempo (s)": t_w, "Fase": fase_arr[:len(t_w)]})
+            result = pd.concat([base] + kinem_parts + sensor_parts, axis=1)
+            return result.iloc[:len(t_w)]
+
+        # ── Botão 1: registro bruto de cada ciclo, uma aba por ciclo ──
+        st.markdown("#### 1 · Registro completo por ciclo (dados brutos)")
+        st.caption(
+            "Uma aba por ciclo (Anterior/Posteromedial/Posterolateral), só com o recorte "
+            "daquele ciclo, cinemática nas primeiras colunas e todos os canais dos "
+            "sensores (ACC/GYR de L5 e Joelho) em seguida. Sempre em dados **brutos** "
+            "(sem detrend/filtro), independentemente do que estiver configurado."
+        )
+        if st.button("Gerar Excel — 1 aba por ciclo (bruto)", use_container_width=True, key="btn_export_cycles"):
             aligned_raw_export, x_samp_raw, align_msg_raw = get_aligned_data(
                 st.session_state.raw_synced, st.session_state.offsets, st.session_state.peak_ref, ref_file=kinem_ref,
             )
-
             if aligned_raw_export is None:
                 st.error(align_msg_raw)
             else:
                 x_axis_raw = x_samp_raw / pfs
-                mask_exp = (x_axis_raw >= view_start) & (x_axis_raw <= view_end)
-                win_idx = np.where(mask_exp)[0]
-
-                if len(win_idx) == 0:
-                    st.error("Janela vazia — ajuste os limites de início/fim.")
-                else:
-                    windowed = {fname: df.iloc[win_idx].reset_index(drop=True) for fname, df in aligned_raw_export.items()}
-                    t_w = np.arange(len(win_idx)) / pfs
-
-                    # Rotula cada amostra com Ciclo (1..N), Direção (quando N=3, no
-                    # padrão do Y-Balance Test) e Fase (Preparação/Descida/Subida)
-                    # definidos na etapa anterior. Amostras após o fechamento do
-                    # último ciclo (fora de qualquer fase) ficam em branco.
-                    x_win_raw = x_axis_raw[win_idx]
-                    seg_idx_raw = np.searchsorted(boundaries_full, x_win_raw, side="right") - 1
-                    in_cycle = (seg_idx_raw >= 0) & (seg_idx_raw < 3 * n_ciclos)
-                    seg_idx_safe = np.clip(seg_idx_raw, 0, 3 * n_ciclos - 1)
-
-                    fase_col = np.where(in_cycle, np.array(PHASE_NAMES)[seg_idx_safe % 3], "")
-                    ciclo_num = seg_idx_safe // 3 + 1
-                    ciclo_col = np.where(in_cycle, ciclo_num.astype(object), None)
-
-                    DIRECTION_NAMES_EXP = ["Anterior", "Posteromedial", "Posterolateral"]
-                    if n_ciclos == 3:
-                        dir_col = np.where(
-                            in_cycle, np.array(DIRECTION_NAMES_EXP)[np.clip(ciclo_num - 1, 0, 2)], "",
-                        )
-                    else:
-                        dir_col = np.full(len(x_win_raw), "", dtype=object)
-
-                    sheets = {}
-                    for gkey, gdef in GROUPS.items():
-                        pf = phone_files[gkey]
-                        sheet = build_export_sheet(
-                            windowed, kinem_ref, pf["acc"], pf["gyr"], gdef["kinem_kw"], t_w,
-                        )
-                        sheet.insert(1, "Ciclo", ciclo_col[:len(sheet)])
-                        sheet.insert(2, "Direção", dir_col[:len(sheet)])
-                        sheet.insert(3, "Fase", fase_col[:len(sheet)])
-                        sheets[gdef["label"]] = sheet
-
-                    buf = io.BytesIO()
-                    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                        for sheet_name, df_sheet in sheets.items():
-                            df_sheet.to_excel(writer, sheet_name=sheet_name, index=False)
-                    buf.seek(0)
-
-                    st.download_button(
-                        "⬇ Baixar sinais_brutos_ytest.xlsx", buf, file_name="sinais_brutos_ytest.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True,
+                cycle_sheets = {}
+                for c in range(1, n_ciclos + 1):
+                    seg_base = (c - 1) * 3
+                    c_start, b1, b2, c_end = (
+                        boundaries_full[seg_base], boundaries_full[seg_base + 1],
+                        boundaries_full[seg_base + 2], boundaries_full[seg_base + 3],
                     )
+                    mask_c = (x_axis_raw >= c_start) & (x_axis_raw <= c_end)
+                    idx_c = np.where(mask_c)[0]
+                    if len(idx_c) == 0:
+                        continue
+                    windowed_c = {fname: df.iloc[idx_c].reset_index(drop=True) for fname, df in aligned_raw_export.items()}
+                    t_c = np.arange(len(idx_c)) / pfs
+                    x_c_raw = x_axis_raw[idx_c]
+                    fase_c = np.where(x_c_raw < b1, "Preparação", np.where(x_c_raw < b2, "Descida", "Subida"))
+                    cycle_sheets[_sheet_name_for_cycle(c)] = _build_full_cycle_sheet(windowed_c, t_c, fase_c)
+
+                if not cycle_sheets:
+                    st.error("Nenhum ciclo com dados na janela atual.")
+                else:
+                    buf1 = io.BytesIO()
+                    with pd.ExcelWriter(buf1, engine="openpyxl") as writer:
+                        for sheet_name, df_sheet in cycle_sheets.items():
+                            df_sheet.to_excel(writer, sheet_name=sheet_name[:31], index=False)
+                    buf1.seek(0)
+                    st.download_button(
+                        "⬇ Baixar registro_por_ciclo_ytest.xlsx", buf1, file_name="registro_por_ciclo_ytest.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True, key="dl_export_cycles",
+                    )
+
+        st.divider()
+
+        # ── Botão 2: métricas por ciclo/fase/canal ──
+        st.markdown("#### 2 · Métricas por ciclo e fase (dados processados)")
+        _metrics_source_label = "reprocessamento da etapa 6" if st.session_state.get("proc_data_cycles") else "processamento da etapa 2"
+        st.caption(
+            f"Uma linha por combinação Ciclo × Fase × Fonte × Canal, com métricas temporais "
+            f"(N amostras, duração, média, desvio padrão, RMS, mínimo, máximo, amplitude, "
+            f"jerk médio, jerk RMS, entropia). Calculado sobre os dados **filtrados** "
+            f"conforme o {_metrics_source_label} (o que estiver ativo agora)."
+        )
+
+        def _channel_metrics(y, fs):
+            y = np.asarray(y, dtype=float)
+            y = y[~np.isnan(y)]
+            n = len(y)
+            if n < 2:
+                return None
+            dy = np.diff(y) * fs
+            hist, _ = np.histogram(y, bins=10)
+            p = hist / hist.sum() if hist.sum() > 0 else hist
+            p_nz = p[p > 0]
+            entropy_ = float(-np.sum(p_nz * np.log2(p_nz))) if len(p_nz) else 0.0
+            return {
+                "N_amostras": n, "Duracao_s": n / fs,
+                "Media": float(np.mean(y)), "DesvPad": float(np.std(y)),
+                "RMS": float(np.sqrt(np.mean(y ** 2))),
+                "Minimo": float(np.min(y)), "Maximo": float(np.max(y)),
+                "Amplitude": float(np.max(y) - np.min(y)),
+                "Jerk_medio_abs": float(np.mean(np.abs(dy))) if len(dy) else np.nan,
+                "Jerk_RMS": float(np.sqrt(np.mean(dy ** 2))) if len(dy) else np.nan,
+                "Entropia_Shannon": entropy_,
+            }
+
+        if st.button("Gerar Excel — métricas por ciclo/fase", use_container_width=True, key="btn_export_metrics"):
+            rows = []
+            for c in range(1, n_ciclos + 1):
+                direction = DIRECTION_NAMES_EXP[c - 1] if n_ciclos == 3 else ""
+                for ph_i, phase_name in enumerate(PHASE_NAMES):
+                    seg = (c - 1) * 3 + ph_i
+                    x0, x1 = boundaries_full[seg], boundaries_full[seg + 1]
+                    mask_seg = (x_axis >= x0) & (x_axis < x1)
+                    if not np.any(mask_seg):
+                        continue
+                    for gkey in GROUPS:
+                        for fname, colname, y in group_traces_cycles[gkey]:
+                            y_seg = np.asarray(y)[:len(x_axis)][mask_seg]
+                            metrics = _channel_metrics(y_seg, pfs)
+                            if metrics is None:
+                                continue
+                            rows.append({
+                                "Ciclo": c, "Direção": direction, "Fase": phase_name,
+                                "Fonte": fname, "Canal": colname,
+                                "Início_s": round(float(x0), 3), "Fim_s": round(float(x1), 3),
+                                **metrics,
+                            })
+
+            if not rows:
+                st.error("Não há dados suficientes para calcular métricas nesta janela/configuração.")
+            else:
+                df_metrics = pd.DataFrame(rows)
+                buf2 = io.BytesIO()
+                with pd.ExcelWriter(buf2, engine="openpyxl") as writer:
+                    df_metrics.to_excel(writer, sheet_name="Metricas", index=False)
+                buf2.seek(0)
+                st.download_button(
+                    "⬇ Baixar metricas_por_ciclo_ytest.xlsx", buf2, file_name="metricas_por_ciclo_ytest.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True, key="dl_export_metrics",
+                )
 
         _step_nav(back_to=6, key_suffix="7")
