@@ -915,29 +915,67 @@ if st.session_state.proc_data and st.session_state.synced:
         else:
             st.caption(f"{n_ciclos} ciclo(s) definidos na etapa anterior, mostrados separadamente abaixo.")
 
+        def _traces_by_family(gkey):
+            """Agrupa os traços de um grupo (L5/Joelho) em 5 famílias: Deslocamento,
+            Velocidade e Aceleração (Kinem, 3 eixos cada) + ACC e GYR (celular, 3 eixos)."""
+            pf = phone_files[gkey]
+            fam = {"Deslocamento": [], "Velocidade": [], "Aceleração": [], "ACC (celular)": [], "GYR (celular)": []}
+            for fname, colname, y in group_traces[gkey]:
+                if fname == kinem_ref:
+                    cn = colname.lower()
+                    if "v(" in cn:
+                        fam["Velocidade"].append((colname, y))
+                    elif "a(" in cn:
+                        fam["Aceleração"].append((colname, y))
+                    else:
+                        fam["Deslocamento"].append((colname, y))
+                elif fname == pf["acc"]:
+                    fam["ACC (celular)"].append((colname, y))
+                elif fname == pf["gyr"]:
+                    fam["GYR (celular)"].append((colname, y))
+            return fam
+
+        def _square_phase_chart(title, x, traces, phase_regions):
+            fig = go.Figure()
+            for label, y in traces:
+                fig.add_trace(go.Scatter(x=x, y=y, mode="lines", name=label, line=dict(width=1.6)))
+            for x0, x1, phname in phase_regions:
+                if x1 > x0:
+                    fig.add_vrect(x0=x0, x1=x1, fillcolor=PHASE_COLORS[phname], line_width=0)
+            fig.update_layout(
+                title=dict(text=title, font_size=12),
+                xaxis=dict(title="Tempo (s)"), yaxis_title="",
+                width=380, height=380, margin=dict(t=38, b=34, l=48, r=10),
+                template="plotly_white", hovermode="x unified",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0, font_size=9),
+            )
+            return fig
+
         for c in range(1, n_ciclos + 1):
-            c_start = boundaries_full[(c - 1) * 3]
-            c_end = boundaries_full[c * 3]
+            seg_base = (c - 1) * 3
+            c_start, b1, b2, c_end = (
+                boundaries_full[seg_base], boundaries_full[seg_base + 1],
+                boundaries_full[seg_base + 2], boundaries_full[seg_base + 3],
+            )
+            phase_regions = [(c_start, b1, "Preparação"), (b1, b2, "Descida"), (b2, c_end, "Subida")]
             mask_c = (x_axis >= c_start) & (x_axis <= c_end)
+            x_c = x_axis[mask_c]
+
             with st.expander(
                 f"{_cycle_label(c)}   ·   {c_start:+.2f} s → {c_end:+.2f} s", expanded=(c == 1),
             ):
-                cyc_cols = st.columns(2)
-                for cyc_col, gkey in zip(cyc_cols, GROUPS):
-                    with cyc_col:
-                        st.markdown(f"#### {GROUPS[gkey]['emoji']} {GROUPS[gkey]['label']}")
-                        for fname, colname, y in group_traces[gkey]:
-                            fig_c = go.Figure()
-                            fig_c.add_trace(go.Scatter(
-                                x=x_axis[mask_c], y=y[mask_c], mode="lines",
-                                line=dict(width=1.5), showlegend=False,
-                            ))
-                            fig_c.update_layout(
-                                title=dict(text=f"<b>{fname[:24]}</b> · {colname}", font_size=11),
-                                xaxis=dict(title="Tempo (s)"), yaxis_title="", height=190,
-                                margin=dict(t=36, b=32, l=50, r=10), template="plotly_white", hovermode="x",
-                            )
-                            st.plotly_chart(fig_c, use_container_width=True)
+                for gkey in GROUPS:
+                    st.markdown(f"#### {GROUPS[gkey]['emoji']} {GROUPS[gkey]['label']}")
+                    fam = _traces_by_family(gkey)
+                    families_present = [(name, traces) for name, traces in fam.items() if traces]
+                    fam_cols = st.columns(3)
+                    for idx, (fam_name, traces) in enumerate(families_present):
+                        sliced = [(label, y[mask_c]) for label, y in traces]
+                        fig_f = _square_phase_chart(
+                            f"{gkey.upper()} · {fam_name}", x_c, sliced, phase_regions,
+                        )
+                        with fam_cols[idx % 3]:
+                            st.plotly_chart(fig_f, use_container_width=False)
 
         _step_nav(back_to=6, next_to=8, next_label="Avançar para exportação ▶", key_suffix="7")
 
