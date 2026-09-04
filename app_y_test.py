@@ -825,7 +825,7 @@ if st.session_state.proc_data and st.session_state.synced:
         # ══════════════════════════════════════
         # Seleção das fases do teste (inclui o corte de janela)
         # ══════════════════════════════════════
-        st.subheader("🪟🦵 Janela e fases do teste")
+        st.subheader("Janela e fases do teste")
 
         _default_knee_col_idx = col_default(kinem_num, [
             "côndilo lateral dir. z", "condilo lateral dir. z", "côndilo lateral dir. d(z)",
