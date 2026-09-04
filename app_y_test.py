@@ -23,6 +23,7 @@ parametrizadas por keywords — nada precisou mudar lá).
 """
 
 import io
+import os
 
 import re
 
@@ -68,6 +69,14 @@ GROUPS = {
 GYR_FILE_KW = {
     "l5": (("gyro", "l5"), ("gyr", "l5")),
     "joelho": (("gyro", "joelho"), ("gyr", "joelho")),
+}
+
+# Imagens de referência de posicionamento do celular (mostradas no último espaço
+# vazio da grade de gráficos de cada ciclo, em "Ciclos separados").
+_ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+REF_IMG_PATHS = {
+    "l5": os.path.join(_ASSETS_DIR, "ref_l5.png"),
+    "joelho": os.path.join(_ASSETS_DIR, "ref_joelho.png"),
 }
 
 DEFAULT_SESSION_STATE = {
@@ -854,7 +863,7 @@ if st.session_state.proc_data and st.session_state.synced:
 
     if st.session_state.wizard_step >= 5:
         # ══════════════════════════════════════
-        # Seleção das fases do teste (inclui o corte de janela)
+        # Seleção das fases do teste (janela calculada automaticamente)
         # ══════════════════════════════════════
         st.subheader("Janela e fases do teste")
 
@@ -868,21 +877,12 @@ if st.session_state.proc_data and st.session_state.synced:
             y_full_for_auto = try_numeric(kdf[_default_knee_col]).values[:len(x_axis)]
             auto_t0 = _detect_first_plateau_start(x_axis, y_full_for_auto)
 
-        wc1, wc2 = st.columns(2)
-        with wc1:
-            view_start = st.number_input(
-                "Início (s) relativo ao pico", value=float(auto_t0), step=0.5, key="view_start",
-            )
-        with wc2:
-            view_end = st.number_input(
-                "Fim (s) relativo ao pico", value=float(x_max_data), step=0.5, key="view_end",
-            )
-        st.caption(
-            "💡 O início já pula automaticamente o começo do teste (salto + acomodação) até o "
-            "primeiro platô do joelho. Ajuste se precisar incluir mais ou menos coisa."
-        )
+        # Janela não é mais escolhida manualmente: início pula automaticamente o
+        # salto + acomodação até o primeiro platô do joelho; fim vai até o final
+        # do registro sincronizado.
+        view_start = float(auto_t0)
+        view_end = float(x_max_data)
 
-        st.divider()
         st.caption(
             "Cada vale do deslocamento vertical do joelho é um ciclo. Escolha quantos ciclos "
             "existem na janela e ajuste os marcadores para dividir cada um em 3 fases: "
@@ -1190,6 +1190,15 @@ if st.session_state.proc_data and st.session_state.synced:
                             st.plotly_chart(fig_f, use_container_width=False)
                         if fam_name == "Deslocamento":
                             st.caption("↕️ Cada eixo centralizado na própria média (só visual) para comparar melhor descida/subida.")
+
+                    # Preenche o último espaço vazio da grade (3ª coluna, abaixo do
+                    # gráfico de Aceleração) com a imagem de referência de
+                    # posicionamento do celular e orientação dos eixos V/AP/ML.
+                    ref_path = REF_IMG_PATHS.get(gkey)
+                    if ref_path and os.path.exists(ref_path):
+                        with fam_cols[2]:
+                            st.image(ref_path, use_container_width=True,
+                                     caption="Posicionamento do celular e orientação dos eixos")
 
         _step_nav(back_to=5, next_to=7, next_label="Avançar para exportação ▶", key_suffix="6")
 
