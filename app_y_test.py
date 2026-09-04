@@ -92,7 +92,8 @@ STEP_NAMES = {
     4: "4 · Seleção de janela",
     5: "5 · Check de qualidade",
     6: "6 · Seleção das fases do teste",
-    7: "7 · Exportar",
+    7: "7 · Ciclos separados",
+    8: "8 · Exportar",
 }
 
 
@@ -177,10 +178,9 @@ def _auto_phase_boundaries(x, y, n_ciclos):
         c_i = edge_forward(ti, next_bound, thr_after)
         bounds.append(x[a_i])
         bounds.append(x[ti])
-        if ci < len(trough_idx) - 1:
-            bounds.append(x[c_i])
+        bounds.append(x[c_i])
     bounds = sorted(bounds)
-    return bounds if len(bounds) == 3 * n_ciclos - 1 else None
+    return bounds if len(bounds) == 3 * n_ciclos else None
 
 
 st.caption(f"**Etapa atual:** {STEP_NAMES.get(st.session_state.wizard_step, '')}")
@@ -808,7 +808,7 @@ if st.session_state.proc_data and st.session_state.synced:
             "Descida": "rgba(251,191,36,0.18)",
             "Subida": "rgba(52,211,153,0.18)",
         }
-        n_bounds = 3 * n_ciclos - 1
+        n_bounds = 3 * n_ciclos
         span = max(view_end - view_start, 0.1)
 
         auto_bounds = (
@@ -831,11 +831,14 @@ if st.session_state.proc_data and st.session_state.synced:
                 i = row_start + j
                 seg_a, seg_b = i, i + 1
                 cyc_a, ph_a = seg_a // 3 + 1, PHASE_NAMES[seg_a % 3]
-                cyc_b, ph_b = seg_b // 3 + 1, PHASE_NAMES[seg_b % 3]
-                label = (
-                    f"C{cyc_a} {ph_a} → C{cyc_b} {ph_b}" if cyc_a != cyc_b
-                    else f"C{cyc_a}: {ph_a} → {ph_b}"
-                )
+                if seg_b < 3 * n_ciclos:
+                    cyc_b, ph_b = seg_b // 3 + 1, PHASE_NAMES[seg_b % 3]
+                    label = (
+                        f"C{cyc_a} {ph_a} → C{cyc_b} {ph_b}" if cyc_a != cyc_b
+                        else f"C{cyc_a}: {ph_a} → {ph_b}"
+                    )
+                else:
+                    label = f"C{cyc_a}: {ph_a} → Fim (fecha o ciclo)"
                 key = f"phase_b_{i}"
                 default_val = auto_bounds[i] if auto_bounds is not None else view_start + (i + 1) * span / (n_bounds + 1)
                 if key in st.session_state and not (view_start <= st.session_state[key] <= view_end):
@@ -885,17 +888,67 @@ if st.session_state.proc_data and st.session_state.synced:
                 phase = PHASE_NAMES[seg % 3]
                 cyc = seg // 3 + 1
                 st.write(f"**Ciclo {cyc} — {phase}:** {x0:+.2f} s → {x1:+.2f} s")
+            tail_start = boundaries_full[3 * n_ciclos]
+            if tail_start < view_end - 1e-6:
+                st.caption(f"⚪ Fora de qualquer ciclo (não entra em nenhuma fase): {tail_start:+.2f} s → {view_end:+.2f} s")
 
-        _step_nav(back_to=5, next_to=7, next_label="Avançar para exportação ▶", key_suffix="6")
+        _step_nav(back_to=5, next_to=7, next_label="Avançar para ver ciclos separados ▶", key_suffix="6")
 
     if st.session_state.wizard_step >= 7:
+        # ══════════════════════════════════════
+        # Ciclos separados — todos os eixos (sensores + cinemática)
+        # ══════════════════════════════════════
+        st.subheader("🔀 Ciclos separados — todos os eixos")
+
+        DIRECTION_NAMES = ["Anterior", "Posteromedial", "Posterolateral"]
+
+        def _cycle_label(c):
+            if n_ciclos == 3 and 1 <= c <= 3:
+                return f"Ciclo {c} — {DIRECTION_NAMES[c - 1]}"
+            return f"Ciclo {c}"
+
+        if n_ciclos == 3:
+            st.caption(
+                "Ciclo 1 = alcance **Anterior**, Ciclo 2 = **Posteromedial**, "
+                "Ciclo 3 = **Posterolateral** (ordem padrão do Y-Balance Test)."
+            )
+        else:
+            st.caption(f"{n_ciclos} ciclo(s) definidos na etapa anterior, mostrados separadamente abaixo.")
+
+        for c in range(1, n_ciclos + 1):
+            c_start = boundaries_full[(c - 1) * 3]
+            c_end = boundaries_full[c * 3]
+            mask_c = (x_axis >= c_start) & (x_axis <= c_end)
+            with st.expander(
+                f"{_cycle_label(c)}   ·   {c_start:+.2f} s → {c_end:+.2f} s", expanded=(c == 1),
+            ):
+                cyc_cols = st.columns(2)
+                for cyc_col, gkey in zip(cyc_cols, GROUPS):
+                    with cyc_col:
+                        st.markdown(f"#### {GROUPS[gkey]['emoji']} {GROUPS[gkey]['label']}")
+                        for fname, colname, y in group_traces[gkey]:
+                            fig_c = go.Figure()
+                            fig_c.add_trace(go.Scatter(
+                                x=x_axis[mask_c], y=y[mask_c], mode="lines",
+                                line=dict(width=1.5), showlegend=False,
+                            ))
+                            fig_c.update_layout(
+                                title=dict(text=f"<b>{fname[:24]}</b> · {colname}", font_size=11),
+                                xaxis=dict(title="Tempo (s)"), yaxis_title="", height=190,
+                                margin=dict(t=36, b=32, l=50, r=10), template="plotly_white", hovermode="x",
+                            )
+                            st.plotly_chart(fig_c, use_container_width=True)
+
+        _step_nav(back_to=6, next_to=8, next_label="Avançar para exportação ▶", key_suffix="7")
+
+    if st.session_state.wizard_step >= 8:
         # ══════════════════════════════════════
         # Exportar Excel — sinais BRUTOS, apenas janela selecionada
         # ══════════════════════════════════════
         st.subheader("📥 Exportar Excel")
         st.caption(
             f"Exporta todos os eixos X, Y, Z **sem detrend/filtro** (dados brutos reamostrados e "
-            f"sincronizados), com colunas **Ciclo** e **Fase** (Preparação/Descida/Subida) • janela: "
+            f"sincronizados), com colunas **Ciclo**, **Direção** e **Fase** (Preparação/Descida/Subida) • janela: "
             f"**{view_start:+.1f} s → {view_end:+.1f} s** relativo ao pico"
         )
 
@@ -920,15 +973,26 @@ if st.session_state.proc_data and st.session_state.synced:
                     windowed = {fname: df.iloc[win_idx].reset_index(drop=True) for fname, df in aligned_raw_export.items()}
                     t_w = np.arange(len(win_idx)) / pfs
 
-                    # Rotula cada amostra com Ciclo (1..N) e Fase (Preparação/Descida/Subida)
-                    # definidos na etapa anterior, usando o tempo relativo ao pico do salto.
+                    # Rotula cada amostra com Ciclo (1..N), Direção (quando N=3, no
+                    # padrão do Y-Balance Test) e Fase (Preparação/Descida/Subida)
+                    # definidos na etapa anterior. Amostras após o fechamento do
+                    # último ciclo (fora de qualquer fase) ficam em branco.
                     x_win_raw = x_axis_raw[win_idx]
-                    seg_idx = np.clip(
-                        np.searchsorted(boundaries_full, x_win_raw, side="right") - 1,
-                        0, 3 * n_ciclos - 1,
-                    )
-                    fase_col = np.array(PHASE_NAMES)[seg_idx % 3]
-                    ciclo_col = (seg_idx // 3 + 1).astype(int)
+                    seg_idx_raw = np.searchsorted(boundaries_full, x_win_raw, side="right") - 1
+                    in_cycle = (seg_idx_raw >= 0) & (seg_idx_raw < 3 * n_ciclos)
+                    seg_idx_safe = np.clip(seg_idx_raw, 0, 3 * n_ciclos - 1)
+
+                    fase_col = np.where(in_cycle, np.array(PHASE_NAMES)[seg_idx_safe % 3], "")
+                    ciclo_num = seg_idx_safe // 3 + 1
+                    ciclo_col = np.where(in_cycle, ciclo_num.astype(object), None)
+
+                    DIRECTION_NAMES_EXP = ["Anterior", "Posteromedial", "Posterolateral"]
+                    if n_ciclos == 3:
+                        dir_col = np.where(
+                            in_cycle, np.array(DIRECTION_NAMES_EXP)[np.clip(ciclo_num - 1, 0, 2)], "",
+                        )
+                    else:
+                        dir_col = np.full(len(x_win_raw), "", dtype=object)
 
                     sheets = {}
                     for gkey, gdef in GROUPS.items():
@@ -937,7 +1001,8 @@ if st.session_state.proc_data and st.session_state.synced:
                             windowed, kinem_ref, pf["acc"], pf["gyr"], gdef["kinem_kw"], t_w,
                         )
                         sheet.insert(1, "Ciclo", ciclo_col[:len(sheet)])
-                        sheet.insert(2, "Fase", fase_col[:len(sheet)])
+                        sheet.insert(2, "Direção", dir_col[:len(sheet)])
+                        sheet.insert(3, "Fase", fase_col[:len(sheet)])
                         sheets[gdef["label"]] = sheet
 
                     buf = io.BytesIO()
@@ -952,4 +1017,4 @@ if st.session_state.proc_data and st.session_state.synced:
                         use_container_width=True,
                     )
 
-        _step_nav(back_to=6, key_suffix="7")
+        _step_nav(back_to=7, key_suffix="8")
