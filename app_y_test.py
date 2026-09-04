@@ -24,12 +24,14 @@ parametrizadas por keywords — nada precisou mudar lá).
 
 import io
 
+import re
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
-from scipy.signal import find_peaks
+from scipy.signal import find_peaks, welch
 
 from signal_utils import (
     NONE_LABEL,
@@ -95,6 +97,35 @@ STEP_NAMES = {
     6: "6 · Ciclos separados",
     7: "7 · Exportar",
 }
+
+
+ANATOMICAL_AXIS_MAP = {
+    "kinem": {"x": "ML", "y": "AP", "z": "V"},
+    "l5_phone": {"x": "ML", "y": "V", "z": "AP"},
+    "joelho_phone": {"x": "AP", "y": "V", "z": "ML"},
+}
+
+
+def _anatomical_label(gkey, source_kind, colname):
+    """Troca a letra do eixo (X/Y/Z) no nome de uma coluna por V (vertical),
+    AP (anteroposterior) ou ML (mediolateral), conforme a convenção anatômica de
+    cada sensor: Kinem (L5 e Joelho) usa Z=V, Y=AP, X=ML; ACC/GYR do celular no L5
+    usa Y=V, Z=AP, X=ML; ACC/GYR do celular no Joelho usa Y=V, X=AP, Z=ML.
+    """
+    axis_map = ANATOMICAL_AXIS_MAP["kinem"] if source_kind == "kinem" else (
+        ANATOMICAL_AXIS_MAP["l5_phone"] if gkey == "l5" else ANATOMICAL_AXIS_MAP["joelho_phone"]
+    )
+    m = re.search(r"\(([XYZxyz])\)", colname)
+    if m:
+        new_axis = axis_map.get(m.group(1).lower(), m.group(1))
+        return colname[:m.start()] + f"({new_axis})" + colname[m.end():]
+    stripped = colname.rstrip()
+    if stripped and stripped[-1].lower() in "xyz" and stripped.strip().lower() not in ("x", "y", "z"):
+        new_axis = axis_map.get(stripped[-1].lower(), stripped[-1])
+        return stripped[:-1] + new_axis
+    if colname.strip().lower() in ("x", "y", "z"):
+        return axis_map.get(colname.strip().lower(), colname)
+    return colname
 
 
 def _is_kinem_displacement_col(col):
@@ -1087,22 +1118,24 @@ if st.session_state.proc_data and st.session_state.synced:
 
         def _traces_by_family(gkey):
             """Agrupa os traços de um grupo (L5/Joelho) em 5 famílias: Deslocamento,
-            Velocidade e Aceleração (Kinem, 3 eixos cada) + ACC e GYR (celular, 3 eixos)."""
+            Velocidade e Aceleração (Kinem, 3 eixos cada) + ACC e GYR (celular, 3 eixos).
+            Rótulos já traduzidos para V/AP/ML conforme a convenção anatômica."""
             pf = phone_files[gkey]
             fam = {"Deslocamento": [], "Velocidade": [], "Aceleração": [], "ACC (celular)": [], "GYR (celular)": []}
             for fname, colname, y in group_traces_cycles[gkey]:
                 if fname == kinem_ref:
                     cn = colname.lower()
+                    label = _anatomical_label(gkey, "kinem", colname)
                     if "v(" in cn:
-                        fam["Velocidade"].append((colname, y))
+                        fam["Velocidade"].append((label, y))
                     elif "a(" in cn:
-                        fam["Aceleração"].append((colname, y))
+                        fam["Aceleração"].append((label, y))
                     else:
-                        fam["Deslocamento"].append((colname, y))
+                        fam["Deslocamento"].append((label, y))
                 elif fname == pf["acc"]:
-                    fam["ACC (celular)"].append((colname, y))
+                    fam["ACC (celular)"].append((_anatomical_label(gkey, "acc", colname), y))
                 elif fname == pf["gyr"]:
-                    fam["GYR (celular)"].append((colname, y))
+                    fam["GYR (celular)"].append((_anatomical_label(gkey, "gyr", colname), y))
             return fam
 
         def _square_phase_chart(title, x, traces, phase_regions):
@@ -1175,24 +1208,32 @@ if st.session_state.proc_data and st.session_state.synced:
 
         def _build_full_cycle_sheet(windowed_src, t_w, fase_arr):
             """Uma aba com Tempo + Fase, colunas de cinemática (Kinem, L5 e Joelho)
-            primeiro, seguidas de TODOS os canais (ACC/GYR de L5 e Joelho)."""
+            primeiro, seguidas de TODOS os canais (ACC/GYR de L5 e Joelho). Colunas já
+            renomeadas para V/AP/ML conforme a convenção anatômica de cada sensor."""
             kdf_w = windowed_src.get(kinem_ref, pd.DataFrame())
             kinem_parts, sensor_parts = [], []
             for gkey, gdef in GROUPS.items():
                 k_cols = kinem_cols_for_body(kdf_w, *gdef["kinem_kw"])
                 if k_cols:
-                    kinem_parts.append(kdf_w[k_cols].reset_index(drop=True))
+                    rename_k = {c: _anatomical_label(gkey, "kinem", c) for c in k_cols}
+                    kinem_parts.append(kdf_w[k_cols].rename(columns=rename_k).reset_index(drop=True))
                 pf = phone_files[gkey]
                 if pf["acc"] != NONE and pf["acc"] in windowed_src:
                     adf = windowed_src[pf["acc"]]
                     cols = [c for c in adf.columns if is_xyz_col(c)]
                     if cols:
-                        sensor_parts.append(adf[cols].add_prefix(f"{gdef['label']}_ACC_").reset_index(drop=True))
+                        rename_a = {c: _anatomical_label(gkey, "acc", c) for c in cols}
+                        sensor_parts.append(
+                            adf[cols].rename(columns=rename_a).add_prefix(f"{gdef['label']}_ACC_").reset_index(drop=True)
+                        )
                 if pf["gyr"] != NONE and pf["gyr"] in windowed_src:
                     gyr_df = windowed_src[pf["gyr"]]
                     cols = [c for c in gyr_df.columns if is_xyz_col(c)]
                     if cols:
-                        sensor_parts.append(gyr_df[cols].add_prefix(f"{gdef['label']}_GYR_").reset_index(drop=True))
+                        rename_g = {c: _anatomical_label(gkey, "gyr", c) for c in cols}
+                        sensor_parts.append(
+                            gyr_df[cols].rename(columns=rename_g).add_prefix(f"{gdef['label']}_GYR_").reset_index(drop=True)
+                        )
             base = pd.DataFrame({"Tempo (s)": t_w, "Fase": fase_arr[:len(t_w)]})
             result = pd.concat([base] + kinem_parts + sensor_parts, axis=1)
             return result.iloc[:len(t_w)]
@@ -1252,7 +1293,7 @@ if st.session_state.proc_data and st.session_state.synced:
         st.caption(
             f"Uma linha por combinação Ciclo × Fase × Fonte × Canal, com métricas temporais "
             f"(N amostras, duração, média, desvio padrão, RMS, mínimo, máximo, amplitude, "
-            f"jerk médio, jerk RMS, entropia). Calculado sobre os dados **filtrados** "
+            f"jerk médio, jerk RMS, frequência mediana, entropia). Calculado sobre os dados **filtrados** "
             f"conforme o {_metrics_source_label} (o que estiver ativo agora)."
         )
 
@@ -1267,6 +1308,18 @@ if st.session_state.proc_data and st.session_state.synced:
             p = hist / hist.sum() if hist.sum() > 0 else hist
             p_nz = p[p > 0]
             entropy_ = float(-np.sum(p_nz * np.log2(p_nz))) if len(p_nz) else 0.0
+
+            freq_mediana = np.nan
+            if n >= 8:
+                try:
+                    freqs, psd = welch(y, fs=fs, nperseg=min(n, 256))
+                    if len(psd) and np.sum(psd) > 0:
+                        cumsum = np.cumsum(psd)
+                        idx = int(np.searchsorted(cumsum, cumsum[-1] / 2.0))
+                        freq_mediana = float(freqs[min(idx, len(freqs) - 1)])
+                except Exception:
+                    freq_mediana = np.nan
+
             return {
                 "N_amostras": n, "Duracao_s": n / fs,
                 "Media": float(np.mean(y)), "DesvPad": float(np.std(y)),
@@ -1275,6 +1328,7 @@ if st.session_state.proc_data and st.session_state.synced:
                 "Amplitude": float(np.max(y) - np.min(y)),
                 "Jerk_medio_abs": float(np.mean(np.abs(dy))) if len(dy) else np.nan,
                 "Jerk_RMS": float(np.sqrt(np.mean(dy ** 2))) if len(dy) else np.nan,
+                "Freq_Mediana_Hz": freq_mediana,
                 "Entropia_Shannon": entropy_,
             }
 
@@ -1289,14 +1343,19 @@ if st.session_state.proc_data and st.session_state.synced:
                     if not np.any(mask_seg):
                         continue
                     for gkey in GROUPS:
+                        pf = phone_files[gkey]
                         for fname, colname, y in group_traces_cycles[gkey]:
+                            source_kind = "kinem" if fname == kinem_ref else (
+                                "acc" if fname == pf["acc"] else "gyr"
+                            )
+                            canal_label = _anatomical_label(gkey, source_kind, colname)
                             y_seg = np.asarray(y)[:len(x_axis)][mask_seg]
                             metrics = _channel_metrics(y_seg, pfs)
                             if metrics is None:
                                 continue
                             rows.append({
                                 "Ciclo": c, "Direção": direction, "Fase": phase_name,
-                                "Fonte": fname, "Canal": colname,
+                                "Fonte": fname, "Canal": canal_label,
                                 "Início_s": round(float(x0), 3), "Fim_s": round(float(x1), 3),
                                 **metrics,
                             })
